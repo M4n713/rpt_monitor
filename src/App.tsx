@@ -6,6 +6,7 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import CollectorPanel from './pages/CollectorPanel';
 import AdminPanel from './pages/AdminPanel';
+import QueueSystem from './pages/QueueSystem';
 import ConnectionStatus from './components/ui/context/ConnectionStatus';
 
 function PrivateRoute({ children, roles }: { children: React.ReactNode, roles?: string[] }) {
@@ -48,6 +49,8 @@ export default function App() {
               <AdminPanel />
             </PrivateRoute>
           } />
+
+          <Route path="/queue" element={<QueueSystem />} />
 
           <Route path="/" element={<Navigate to="/login" />} />
         </Routes>

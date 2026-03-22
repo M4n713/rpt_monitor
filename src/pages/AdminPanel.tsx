@@ -57,8 +57,9 @@ import {
   Globe,
   MapPin,
   Trash2,
-  Clock
+  Clock as ClockIcon
 } from 'lucide-react';
+import { QueueManagement } from '../components/QueueManagement';
 
 interface Inquiry {
   id: number;
@@ -96,7 +97,6 @@ interface Property {
   claimed_area?: string;
   owners?: { id: number; full_name: string; ownership_type?: string; claimed_area?: string }[];
   remarks?: string;
-  property_status?: string;
 }
 
 interface Payment {
@@ -148,24 +148,6 @@ const getLocationFromPin = (pin: string) => {
     default: return 'Unknown Location';
   }
 };
-
-interface Assessment {
-  id: number;
-  property_id: number;
-  taxpayer_id: number;
-  amount: number;
-  year: string;
-  basic_tax: number;
-  sef_tax: number;
-  interest: number;
-  discount: number;
-  status: string;
-  pin?: string;
-  registered_owner_name?: string;
-  td_no?: string;
-  lot_no?: string;
-  total_area?: string;
-}
 
 // Helper function to get current date/time in Philippine timezone (UTC+8)
 const getPHTimeNow = (): Date => {
@@ -471,12 +453,9 @@ export default function AdminPanel() {
   const [extractedPdfData, setExtractedPdfData] = useState<Array<{ startYear: number; endYear: number; assessed_value: number }> | null>(null);
   const [abstractSearchQuery, setAbstractSearchQuery] = useState('');
   const [activeAbstractSearchQuery, setActiveAbstractSearchQuery] = useState('');
-  const [abstractSelectedCollectorId, setAbstractSelectedCollectorId] = useState<string>('all');
-  const [abstractSelectedDate, setAbstractSelectedDate] = useState<string>('');
 
   const abstractSummary = useMemo(() => {
-
-    let filtered = allPayments.filter(p =>
+    const filtered = allPayments.filter(p =>
       p.or_no?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
       p.year?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
       p.pin?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
@@ -485,61 +464,19 @@ export default function AdminPanel() {
       p.registered_owner_name?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase())
     );
 
-    // Filter by Collector if selected
-    if (abstractSelectedCollectorId !== 'all') {
-      filtered = filtered.filter(p => p.collector_id.toString() === abstractSelectedCollectorId);
-    }
-
-    // Filter by Specific Date if selected
-    if (abstractSelectedDate) {
-      filtered = filtered.filter(p => {
-        const d = new Date(p.payment_date);
-        const searchDate = new Date(abstractSelectedDate);
-        return d.toDateString() === searchDate.toDateString();
-      });
-    }
-
     const uniqueTaxpayers = new Set(filtered.map(p => p.taxpayer_name).filter(Boolean)).size;
     const uniquePins = new Set(filtered.map(p => p.pin).filter(Boolean)).size;
-    
-    // total collection for the selected date (or today if no date selected)
-    const queryDate = abstractSelectedDate ? new Date(abstractSelectedDate) : new Date();
-    
-    const totalAmount = allPayments.reduce((sum, p) => {
-      let dStr = p.payment_date;
-      if (typeof dStr === 'string' && !dStr.includes('Z') && !dStr.includes('+')) dStr = dStr.replace(' ', 'T') + 'Z';
-      const d = new Date(dStr || new Date());
-      const isSearchDate = d.toDateString() === queryDate.toDateString();
-      if (!isSearchDate) return sum;
-      
-      // If a collector is selected, also filter the total by that collector
-      if (abstractSelectedCollectorId !== 'all' && p.collector_id.toString() !== abstractSelectedCollectorId) return sum;
-
+    const totalAmount = filtered.reduce((sum, p) => {
       const amount = typeof p.amount === 'string' ? parseFloat(p.amount) : (p.amount || 0);
       return sum + (isNaN(amount) ? 0 : amount);
     }, 0);
-
-    // total collection to date (Filtered by collector if selected)
     const toDateAmount = allPayments.reduce((sum, p) => {
-      if (abstractSelectedCollectorId !== 'all' && p.collector_id.toString() !== abstractSelectedCollectorId) return sum;
       const amount = typeof p.amount === 'string' ? parseFloat(p.amount) : (p.amount || 0);
       return sum + (isNaN(amount) ? 0 : amount);
     }, 0);
 
-    // My collection of the day (only for the current logged-in user)
-    const myTotalAmount = allPayments.reduce((sum, p) => {
-      if (p.collector_id !== user?.id) return sum;
-      let dStr = p.payment_date;
-      if (typeof dStr === 'string' && !dStr.includes('Z') && !dStr.includes('+')) dStr = dStr.replace(' ', 'T') + 'Z';
-      const d = new Date(dStr || new Date());
-      const isToday = d.toDateString() === new Date().toDateString();
-      if (!isToday) return sum;
-      const amount = typeof p.amount === 'string' ? parseFloat(p.amount) : (p.amount || 0);
-      return sum + (isNaN(amount) ? 0 : amount);
-    }, 0);
-
-    return { uniqueTaxpayers, uniquePins, totalAmount, toDateAmount, myTotalAmount, filtered };
-  }, [allPayments, activeAbstractSearchQuery, abstractSelectedCollectorId, abstractSelectedDate]);
+    return { uniqueTaxpayers, uniquePins, totalAmount, toDateAmount, filtered };
+  }, [allPayments, activeAbstractSearchQuery]);
 
   const [logs, setLogs] = useState<any[]>([]);
   const [taxpayerLogs, setTaxpayerLogs] = useState<any[]>([]);
@@ -548,7 +485,6 @@ export default function AdminPanel() {
   const [isLoadingLogProperties, setIsLoadingLogProperties] = useState(false);
   const [showLogPinsModal, setShowLogPinsModal] = useState(false);
   const [selectedLogId, setSelectedLogId] = useState<number | null>(null);
-  const [pendingAssessments, setPendingAssessments] = useState<Assessment[]>([]);
   const [taxpayerTimeIn, setTaxpayerTimeIn] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState('tagging');
   const [activeSettingsTab, setActiveSettingsTab] = useState('create-taxpayer');
@@ -584,14 +520,17 @@ export default function AdminPanel() {
   const [delinquencyBarangay, setDelinquencyBarangay] = useState('all');
   const [delinquencyInterestMode, setDelinquencyInterestMode] = useState<'with' | 'without'>('with');
   const [isDelinquencyLoading, setIsDelinquencyLoading] = useState(false);
+  const [delinquencyReportGenerated, setDelinquencyReportGenerated] = useState(false);
 
   const fetchDelinquencyReport = async () => {
     setIsDelinquencyLoading(true);
+    setDelinquencyReportGenerated(false);
     try {
-      const res = await fetch(`/api/admin/delinquency-report?type=${delinquencyReportType}`);
+      const res = await fetch(`/api/admin/delinquency-report?type=${delinquencyReportType}&barangayCode=${delinquencyBarangay}`);
       if (res.ok) {
         const data = await res.json();
         setDelinquencyData(data);
+        setDelinquencyReportGenerated(true);
       }
     } catch (err) {
       console.error('Failed to fetch delinquency report:', err);
@@ -600,11 +539,14 @@ export default function AdminPanel() {
     }
   };
 
+  // Remove automatic fetch of delinquency report
+  /* 
   useEffect(() => {
     if (activeTab === 'delinquency-report') {
       fetchDelinquencyReport();
     }
   }, [activeTab, delinquencyReportType]);
+  */
 
   const syncGlobalSearch = (val: string, submit: boolean = false) => {
     const formatted = autoFormatPinInput(val);
@@ -725,7 +667,7 @@ export default function AdminPanel() {
 
 
   const menuItems = [
-    { id: 'tagging', label: 'Tagging Real Property', subtitle: 'Search and Link Properties', icon: Tag },
+    { id: 'tagging', label: 'Assessment Roll', subtitle: 'Search and Link Properties', icon: Tag },
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'payment-queue', label: 'Payment Queue', subtitle: 'Manage Payments and Assessments', icon: CreditCard }] : []),
     { id: 'computation', label: 'RPT Computation', subtitle: 'Calculate Tax Due', icon: Calculator },
     { id: 'rptar', label: 'RPTAR', subtitle: 'RPT Account Register', icon: User },
@@ -737,6 +679,7 @@ export default function AdminPanel() {
     { id: 'active-users', label: 'Active Users', subtitle: 'Currently Online Users', icon: Users },
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'delinquency-report', label: 'Delinquency Report', subtitle: 'View Delinquent Accounts', icon: AlertTriangle }] : []),
     { id: 'settings', label: 'Settings', subtitle: 'Manage System Settings', icon: Settings },
+    { id: 'queue-management', label: 'Live Queue', icon: ClockIcon, subtitle: 'Real-time service queue tracker' }
   ];
 
   const settingsItems = [
@@ -747,7 +690,7 @@ export default function AdminPanel() {
     { id: 'change-password', label: 'Change Password', icon: Lock },
     { id: 'direct-messages', label: 'Direct Messages', icon: MessageSquare },
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'manage-barangays', label: 'Manage Barangays', icon: MapPin }] : []),
-    ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'manage-data', label: 'Manage Data', icon: Database }] : [])
+    ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'manage-data', label: 'Manage Data', icon: Database }] : []),
   ];
 
   useEffect(() => {
@@ -792,6 +735,8 @@ export default function AdminPanel() {
       fetchLogs();
       const interval = setInterval(fetchLogs, 10000);
       return () => clearInterval(interval);
+    } else if (activeTab === 'delinquency-report') {
+      fetchBarangays();
     }
   }, [activeTab]);
 
@@ -1186,20 +1131,7 @@ export default function AdminPanel() {
 
     fetchLogs();
     fetchTaxpayerLogs();
-    fetchAssessments();
   }, []);
-
-  const fetchAssessments = async () => {
-    try {
-      const res = await fetch('/api/assessments');
-      if (res.ok) {
-        const data = await res.json();
-        setPendingAssessments(data);
-      }
-    } catch (err) {
-      console.error('Failed to fetch assessments', err);
-    }
-  };
 
   // Fetch properties when taxpayer is selected
   useEffect(() => {
@@ -1535,9 +1467,49 @@ export default function AdminPanel() {
 
   const handleSubmitAssessment = async () => {
     if (paymentQueue.length === 0) return;
-
     if (!selectedTaxpayerId) {
       alert('Please select a taxpayer first.');
+      return;
+    }
+
+    const proceedToPayment = window.confirm('Proceed with Tax Payment?');
+    const timeOut = getPHTimeNow().toISOString();
+    const timeIn = taxpayerTimeIn[selectedTaxpayerId] || getPHTimeNow().toISOString();
+    const pins = paymentQueue.map(item => item.pin);
+    const taxpayerName = users.find(u => u.id.toString() === selectedTaxpayerId)?.full_name || 'Unknown';
+
+    if (!proceedToPayment) {
+      // Log session closure even if no payment
+      try {
+        await fetch('/api/taxpayer-logs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            taxpayer_id: selectedTaxpayerId,
+            taxpayer_name: taxpayerName,
+            pins: JSON.stringify(pins),
+            time_in: timeIn,
+            time_out: timeOut,
+            role: 'admin',
+            remarks: 'Cancelled'
+          })
+        });
+
+        // Also cancel queue since they are leaving
+        await fetch('/api/admin/cancel-queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taxpayer_id: selectedTaxpayerId })
+        });
+
+        alert('Taxpayer session closed (No Payment)');
+        setPaymentQueue([]);
+        setSelectedTaxpayerId('');
+        fetchTaxpayerLogs();
+        fetchUsers();
+      } catch (err) {
+        console.error('Failed to log taxpayer timeout', err);
+      }
       return;
     }
 
@@ -1561,11 +1533,6 @@ export default function AdminPanel() {
       alert('Assessment submitted to collector successfully');
 
       // Log taxpayer activity
-      const timeIn = taxpayerTimeIn[selectedTaxpayerId] || getPHTimeNow().toISOString();
-      const timeOut = getPHTimeNow().toISOString();
-      const pins = paymentQueue.map(item => item.pin);
-      const taxpayerName = users.find(u => u.id.toString() === selectedTaxpayerId)?.full_name || 'Unknown';
-
       try {
         await fetch('/api/taxpayer-logs', {
           method: 'POST',
@@ -1584,10 +1551,12 @@ export default function AdminPanel() {
       }
 
       setPaymentQueue([]);
-      fetchAssessments();
-    } catch (err) {
+      setSelectedTaxpayerId('');
+      // Refresh properties if needed
+      fetchUsers();
+    } catch (err: any) {
       console.error('Assessment error', err);
-      alert(err instanceof Error ? err.message : 'An error occurred');
+      alert(err.message);
     }
   };
 
@@ -1984,20 +1953,79 @@ export default function AdminPanel() {
     <div className="space-y-8">
       <Card className="border-none shadow-sm">
         <CardContent className="pt-6">
-          <div className="flex gap-2 mb-8">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <Input
-                placeholder="Search by PIN, Registered Owner or TD No."
-                className="pl-10 rounded-md"
-                value={searchQuery}
-                onChange={(e) => syncGlobalSearch(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    syncGlobalSearch(searchQuery, true);
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mb-8">
+            <div className="lg:col-span-8">
+              <Label className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-2 block">Search Property</Label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <Input
+                    placeholder="Search by PIN, Registered Owner or TD No."
+                    className="pl-10 h-12 rounded-xl border-gray-200"
+                    value={searchQuery}
+                    onChange={(e) => syncGlobalSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        syncGlobalSearch(searchQuery, true);
+                      }
+                    }}
+                  />
+                </div>
+                <Button
+                  onClick={() => syncGlobalSearch(searchQuery, true)}
+                  className="h-12 px-6 rounded-xl bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold"
+                >
+                  Search
+                </Button>
+              </div>
+            </div>
+
+            <div className="lg:col-span-4 pl-6">
+              <Label className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-2 block">Select Taxpayer Account</Label>
+              <Select
+                value={tagForm.taxpayer_id}
+                onValueChange={(v) => {
+                  const user = users.find(u => u.id.toString() === v);
+                  setTagForm(prev => ({
+                    ...prev,
+                    taxpayer_id: v,
+                    assigned_collector_id: user?.assigned_collector_id?.toString() || ''
+                  }));
+                  if (!taxpayerTimeIn[v]) {
+                    setTaxpayerTimeIn(prev => ({ ...prev, [v]: getPHTimeNow().toISOString() }));
                   }
+                  // Notify taxpayer it's their turn
+                  fetch('/api/admin/notify-taxpayer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ taxpayer_id: v })
+                  }).catch(console.error);
                 }}
-              />
+              >
+                <SelectTrigger className="w-full h-10 rounded-xl border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20">
+                  <SelectValue placeholder="Choose a taxpayer..." />
+                </SelectTrigger>
+                <SelectContent className="max-h-[300px]">
+                  {users.filter(u => u.role === 'taxpayer').length === 0 && (
+                    <div className="p-4 text-center text-sm text-gray-500">
+                      No taxpayers found.
+                    </div>
+                  )}
+                  {users.filter(u => u.role === 'taxpayer')
+                    .sort((a, b) => (a.queue_number || 0) - (b.queue_number || 0))
+                    .map((u) => (
+                      <SelectItem key={u.id} value={u.id.toString()}>
+                        <div className="flex items-center gap-2">
+                          <User className="w-4 h-4 text-gray-400" />
+                          <span>
+                            {u.queue_number ? `[RPT-${String(u.queue_number).padStart(3, '0')}] ` : ''}
+                            {u.full_name}
+                          </span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -2006,8 +2034,10 @@ export default function AdminPanel() {
               {/* Search Results List */}
               <div className="lg:col-span-8 space-y-4">
                 <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider">Property Results</h2>
-                  <span className="text-xs text-gray-400">{searchResults.length} {searchResults.length === 1 ? 'Property Found' : 'Properties Found'}</span>
+                  <h2 className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em]">
+                    {searchResults.length === 1 ? 'Search Result' : 'Search Results'}
+                  </h2>
+                  <span className="text-xs text-gray-400">{searchResults.length} {searchResults.length === 1 ? 'Property' : 'Properties'} Found</span>
                 </div>
 
                 <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar">
@@ -2019,14 +2049,12 @@ export default function AdminPanel() {
                   )}
                   {searchResults.map(prop => {
                     const isSelected = selectedProperties.some(p => p.id === prop.id);
-                    // Output Active/Retired status
-                    const pinStatus = (prop.property_status || 'active').toLowerCase();
                     return (
                       <div
                         key={prop.id}
                         className={`p-4 border transition-all rounded-xl cursor-pointer hover:shadow-md ${isSelected
-                            ? 'border-blue-500 bg-blue-50/50 ring-1 ring-blue-500'
-                            : 'border-gray-100 bg-white'
+                          ? 'border-blue-500 bg-blue-50/50 ring-1 ring-blue-500'
+                          : 'border-gray-100 bg-white'
                           }`}
                         onClick={() => togglePropertySelection(prop)}
                       >
@@ -2037,7 +2065,30 @@ export default function AdminPanel() {
                               {isSelected && <CheckCircle className="w-3.5 h-3.5 text-white" />}
                             </div>
                             <div>
-                              <h3 className="font-bold text-gray-900">{prop.registered_owner_name}</h3>
+                              {/* 1. Wrapped the name and badges in a flex container */}
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h3 className="font-bold text-gray-900">{prop.registered_owner_name}</h3>
+
+                                {/* 2. Status Badge (Green for Active, Red for Delinquent) */}
+                                {prop.status && (
+                                  <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${prop.status.toLowerCase() === 'active'
+                                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                      : prop.status.toLowerCase() === 'delinquent'
+                                        ? 'bg-red-50 text-red-700 border-red-200'
+                                        : 'bg-gray-50 text-gray-700 border-gray-200'
+                                    }`}>
+                                    {prop.status}
+                                  </span>
+                                )}
+
+                                {/* 3. Classification Badge (Blue) */}
+                                {prop.classification && (
+                                  <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                    {prop.classification}
+                                  </span>
+                                )}
+                              </div>
+
                               <div className="flex flex-wrap gap-2 mt-1">
                                 <p className="text-[10px] font-mono text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
                                   PIN: {prop.pin}
@@ -2052,14 +2103,6 @@ export default function AdminPanel() {
                                   Area: {prop.total_area}
                                 </p>
                               </div>
-                              <span className={`mt-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full ${
-                                pinStatus === 'active'
-                                  ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
-                                  : 'bg-gray-100 text-gray-500 border border-gray-200'
-                              }`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${pinStatus === 'active' ? 'bg-emerald-500' : 'bg-gray-400'}`} />
-                                {pinStatus === 'active' ? 'Active' : 'Retired'}
-                              </span>
                             </div>
                           </div>
                           {prop.linked_taxpayer && (
@@ -2093,126 +2136,78 @@ export default function AdminPanel() {
               <div className="lg:col-span-4">
                 <div className="sticky top-8">
                   <div className="border border-gray-100 rounded-2xl p-6 bg-white shadow-sm">
-                    <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-4">{selectedProperties.length === 1 ? 'Tagged Property' : 'Tagged Properties'}</h2>
+                    <h2 className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-1.5">
+                      {selectedProperties.length > 1 ? 'Linked Properties' : 'Linked Property'}
+                    </h2>
                     {selectedProperties.length > 0 ? (
                       <form onSubmit={handleTagSubmit} className="space-y-5">
-                        <div className="pb-4 border-bottom border-gray-50">
-
-                          <p className="text-lg font-bold text-gray-900 leading-tight mt-1">
-                            {selectedProperties.length} {selectedProperties.length === 1 ? 'Property' : 'Properties'} Selected
-                          </p>
-                          <div className="flex flex-wrap gap-2 mt-2 max-h-32 overflow-y-auto custom-scrollbar">
+                        <div className="space-y-0">
+                          <div className="max-h-[600px] overflow-y-auto custom-scrollbar pr-2 border-t border-gray-50 pt-1">
                             {selectedProperties.map(p => (
-                              <span key={p.id} className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded flex items-center gap-1">
-                                {p.pin}
-                                <button
-                                  type="button"
-                                  onClick={(e) => { e.stopPropagation(); togglePropertySelection(p); }}
-                                  className="hover:text-gray-900"
-                                >
-                                  &times;
-                                </button>
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <Label htmlFor="taxpayer" className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Select Taxpayer Account</Label>
-                          <Select
-                            value={tagForm.taxpayer_id}
-                            onValueChange={(v) => {
-                              const user = users.find(u => u.id.toString() === v);
-                              setTagForm(prev => ({
-                                ...prev,
-                                taxpayer_id: v,
-                                assigned_collector_id: user?.assigned_collector_id?.toString() || ''
-                              }));
-                              if (!taxpayerTimeIn[v]) {
-                                setTaxpayerTimeIn(prev => ({ ...prev, [v]: getPHTimeNow().toISOString() }));
-                              }
-                            }}
-                          >
-                            <SelectTrigger className="w-full h-12 rounded-xl border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20 disabled:bg-gray-50 disabled:text-gray-500">
-                              <SelectValue placeholder="Choose a taxpayer..." />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {users.filter(u => u.role === 'taxpayer').length === 0 && (
-                                <div className="p-4 text-center text-sm text-gray-500">
-                                  No taxpayers found. <br />
-                                  <span className="text-xs">Create one in Settings &gt; Create Taxpayer</span>
-                                </div>
-                              )}
-                              {users.filter(u => u.role === 'taxpayer').map((u) => (
-                                <SelectItem key={u.id} value={u.id.toString()}>
-                                  <span className="flex items-center gap-2">
-                                    <User className="w-4 h-4 text-gray-400" />
-                                    <span>
-                                      {u.queue_number ? `[RPT-${String(u.queue_number).padStart(3, '0')}] ` : ''}
-                                      {u.full_name} ({u.username})
-                                    </span>
-                                  </span>
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-
-                        <div className="space-y-4">
-                          <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Ownership Type</Label>
-                          <div className="max-h-64 overflow-y-auto custom-scrollbar space-y-3 pr-2">
-                            {selectedProperties.map(p => (
-                              <div key={p.id} className="p-3 border border-gray-100 rounded-xl bg-gray-50/50">
-                                <div className="flex justify-between items-center mb-2">
-                                  <span className="text-xs font-bold text-gray-700">{p.pin}</span>
-                                  <span className="text-[10px] text-gray-500 truncate max-w-[150px]">{p.registered_owner_name}</span>
-                                </div>
-                                <div className="space-y-2">
-                                  <Select
-                                    value={propertyDetails[p.id]?.ownership_type || 'full'}
-                                    onValueChange={v => setPropertyDetails(prev => ({
-                                      ...prev,
-                                      [p.id]: { ...prev[p.id], ownership_type: v }
-                                    }))}
-                                    disabled={p.owners && p.owners.length > 0}
+                              <div key={p.id} className="py-1 flex items-center justify-start gap-2 border-b border-gray-50/80 last:border-0 hover:bg-gray-50/30 transition-colors px-1">
+                                <div className="flex items-center gap-2 w-[185px] shrink-0">
+                                  <span className="text-[11px] font-mono font-bold text-gray-600 truncate">{p.pin}</span>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); togglePropertySelection(p); }}
+                                    className="text-gray-300 hover:text-red-500 transition-colors text-sm"
                                   >
-                                    <SelectTrigger className="w-full h-9 rounded-lg border-gray-200 bg-white px-3 text-xs font-medium text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20 disabled:bg-gray-50 disabled:text-gray-500">
-                                      <SelectValue placeholder="Select ownership..." />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="full" className="text-xs">Full Area</SelectItem>
-                                      <SelectItem value="shared" className="text-xs">Share Area</SelectItem>
-                                    </SelectContent>
-                                  </Select>
+                                    &times;
+                                  </button>
+                                </div>
 
-                                  {propertyDetails[p.id]?.ownership_type === 'shared' && (
-                                    <div className="animate-in fade-in slide-in-from-top-1">
-                                      <Input
-                                        placeholder="Share Area (sqm)"
-                                        className="h-9 rounded-lg text-xs disabled:bg-gray-50 disabled:text-gray-500"
-                                        value={propertyDetails[p.id]?.claimed_area || ''}
-                                        onChange={(e) => setPropertyDetails(prev => ({
-                                          ...prev,
-                                          [p.id]: { ...prev[p.id], claimed_area: e.target.value }
-                                        }))}
-                                        required
-                                        disabled={p.owners && p.owners.length > 0}
-                                      />
-                                    </div>
-                                  )}
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <div className="w-[85px]">
+                                    <Select
+                                      value={propertyDetails[p.id]?.ownership_type || 'full'}
+                                      onValueChange={v => setPropertyDetails(prev => ({
+                                        ...prev,
+                                        [p.id]: { ...prev[p.id], ownership_type: v }
+                                      }))}
+                                      disabled={p.owners && p.owners.length > 0}
+                                    >
+                                      <SelectTrigger className="h-6 rounded-md border-gray-200 bg-white px-2 text-[10px] font-bold text-gray-600 shadow-none hover:border-blue-300 transition-colors focus:ring-0">
+                                        <SelectValue placeholder="Type" />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="full" className="text-[10px]">Full Area</SelectItem>
+                                        <SelectItem value="shared" className="text-[10px]">Share Area</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+
+                                  <div className="w-[60px]">
+                                    {propertyDetails[p.id]?.ownership_type === 'shared' ? (
+                                      <div className="animate-in fade-in slide-in-from-right-1">
+                                        <Input
+                                          placeholder="Sqm"
+                                          className="h-6 rounded-md text-[10px] font-mono border-gray-200 px-2 focus:ring-0 shadow-none"
+                                          value={propertyDetails[p.id]?.claimed_area || ''}
+                                          onChange={(e) => setPropertyDetails(prev => ({
+                                            ...prev,
+                                            [p.id]: { ...prev[p.id], claimed_area: e.target.value }
+                                          }))}
+                                          required
+                                          disabled={p.owners && p.owners.length > 0}
+                                        />
+                                      </div>
+                                    ) : (
+                                      <div className="h-6" /> // Placeholder for alignment
+                                    )}
+                                  </div>
                                 </div>
                               </div>
                             ))}
                           </div>
                         </div>
 
-                        <div className="space-y-2">
-                          <Label htmlFor="collector" className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Assigned to (Collector)</Label>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="collector" className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em] block">Assigned to Collector</Label>
                           <Select
                             value={tagForm.assigned_collector_id}
                             onValueChange={(v) => setTagForm(prev => ({ ...prev, assigned_collector_id: v }))}
                           >
-                            <SelectTrigger className="w-full h-12 rounded-xl border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20">
+                            <SelectTrigger className="w-full h-10 rounded-xl border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20">
                               <SelectValue placeholder="Unassigned" />
                             </SelectTrigger>
                             <SelectContent>
@@ -2286,6 +2281,12 @@ export default function AdminPanel() {
                   if (!taxpayerTimeIn[v]) {
                     setTaxpayerTimeIn(prev => ({ ...prev, [v]: getPHTimeNow().toISOString() }));
                   }
+                  // Notify taxpayer it's their turn
+                  fetch('/api/admin/notify-taxpayer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ taxpayer_id: v })
+                  }).catch(console.error);
                 }}
               >
                 <SelectTrigger className="w-full h-12 rounded-xl border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20">
@@ -2323,12 +2324,7 @@ export default function AdminPanel() {
                   <SelectValue placeholder="Select PIN" />
                 </SelectTrigger>
                 <SelectContent>
-                  {properties
-                    .filter(p => 
-                      p.owners?.some(o => o.id === Number(selectedTaxpayerId)) && 
-                      !pendingAssessments.some(a => a.property_id === p.id && a.status === 'pending')
-                    )
-                    .map(p => (
+                  {properties.filter(p => p.owners?.some(o => o.id === Number(selectedTaxpayerId))).map(p => (
                     <SelectItem key={p.id} value={p.id.toString()}>
                       <div className="flex items-center gap-2">
                         <Home className="w-4 h-4 text-gray-400" />
@@ -2364,10 +2360,6 @@ export default function AdminPanel() {
                 <div>
                   <span className="block text-gray-500 text-xs uppercase">Assessed Value</span>
                   <span className="font-medium">{parseFloat(String(selectedCompProperty.assessed_value || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                </div>
-                <div>
-                  <span className="block text-gray-500 text-xs uppercase">Area (in sq.m)</span>
-                  <span className="font-medium">{selectedCompProperty.total_area || '-'}</span>
                 </div>
               </div>
             </div>
@@ -2616,69 +2608,6 @@ export default function AdminPanel() {
           </CardContent>
         </Card>
       )}
-
-      {/* Pending Assessments (Submitted to Collector but not paid) */}
-      {selectedTaxpayerId && pendingAssessments.filter(a => a.taxpayer_id.toString() === selectedTaxpayerId).length > 0 && (
-        <Card className="border-orange-200 mt-6 shadow-sm">
-          <CardHeader className="bg-orange-50/50">
-            <CardTitle className="text-orange-900 flex items-center gap-2">
-              <Clock className="w-5 h-5 text-orange-600" />
-              Pending Assessments in Collector's Queue
-            </CardTitle>
-            <CardDescription className="text-orange-700 font-medium">These assessments have been submitted but haven't been processed for payment yet.</CardDescription>
-          </CardHeader>
-          <CardContent className="pt-6">
-            <div className="border border-orange-100 rounded-xl overflow-hidden shadow-sm">
-              <table className="w-full text-sm text-left">
-                <thead className="bg-orange-50/80 border-b border-orange-100">
-                  <tr>
-                    <th className="px-6 py-4 text-xs font-semibold text-orange-800 uppercase tracking-wider">PIN</th>
-                    <th className="px-6 py-4 text-xs font-semibold text-orange-800 uppercase tracking-wider">Years Covered</th>
-                    <th className="px-6 py-4 text-xs font-semibold text-orange-800 uppercase tracking-wider text-right">Total Amount</th>
-                    <th className="px-6 py-4 text-xs font-semibold text-orange-800 uppercase tracking-wider text-center">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-orange-50 bg-white">
-                  {pendingAssessments
-                    .filter(a => a.taxpayer_id.toString() === selectedTaxpayerId)
-                    .map((item) => (
-                    <tr key={item.id} className="hover:bg-orange-50/30 transition-colors">
-                      <td className="px-6 py-4 font-mono text-orange-900 font-semibold">{item.pin}</td>
-                      <td className="px-6 py-4 text-gray-600 font-medium">{item.year}</td>
-                      <td className="px-6 py-4 text-right font-bold text-gray-900 font-mono text-lg">
-                        ₱ {parseFloat(String(item.amount || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-9 text-red-600 hover:text-red-700 hover:bg-red-50 gap-2 font-semibold"
-                          onClick={async () => {
-                            if (window.confirm('Are you sure you want to cancel and remove this assessment from the queue?')) {
-                              try {
-                                const res = await fetch(`/api/assessments/${item.id}`, { method: 'DELETE' });
-                                if (res.ok) {
-                                  alert('Assessment removed from queue successfully');
-                                  fetchAssessments();
-                                }
-                              } catch (err) {
-                                console.error('Failed to delete assessment', err);
-                              }
-                            }
-                          }}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          Cancel Submission
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 
@@ -2823,8 +2752,8 @@ export default function AdminPanel() {
               key={item.id}
               onClick={() => setActiveSettingsTab(item.id)}
               className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all ${activeSettingsTab === item.id
-                  ? 'bg-blue-50 text-blue-600 shadow-sm'
-                  : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900'
+                ? 'bg-blue-50 text-blue-600 shadow-sm'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900'
                 }`}
             >
               <item.icon className={`w-4 h-4 ${activeSettingsTab === item.id ? 'text-blue-600' : 'text-gray-400'}`} />
@@ -2835,7 +2764,7 @@ export default function AdminPanel() {
       </div>
 
       <div className="lg:col-span-9">
-        {activeSettingsTab === 'create-admin' && user?.username?.toLowerCase() === 'manlie' && (
+        {activeSettingsTab === 'create-admin' && user?.username.toLowerCase() === 'manlie' && (
           <Card className="border-none shadow-sm">
             <CardHeader>
               <CardTitle>Create Admin Account</CardTitle>
@@ -2871,7 +2800,7 @@ export default function AdminPanel() {
           </Card>
         )}
 
-        {activeSettingsTab === 'create-collector' && user?.username?.toLowerCase() === 'manlie' && (
+        {activeSettingsTab === 'create-collector' && user?.username.toLowerCase() === 'manlie' && (
           <Card className="border-none shadow-sm">
             <CardHeader>
               <CardTitle>Create Collector Account</CardTitle>
@@ -2943,7 +2872,7 @@ export default function AdminPanel() {
           </Card>
         )}
 
-        {activeSettingsTab === 'reset-password' && user?.username?.toLowerCase() === 'manlie' && (
+        {activeSettingsTab === 'reset-password' && user?.username.toLowerCase() === 'manlie' && (
           <Card className="border-none shadow-sm">
             <CardHeader>
               <CardTitle>Reset User Password</CardTitle>
@@ -3058,7 +2987,7 @@ export default function AdminPanel() {
           <MessagingPanel />
         )}
 
-        {activeSettingsTab === 'manage-barangays' && user?.username?.toLowerCase() === 'manlie' && (
+        {activeSettingsTab === 'manage-barangays' && user?.username.toLowerCase() === 'manlie' && (
           <Card className="border-none shadow-sm">
             <CardHeader>
               <CardTitle>Manage Barangays</CardTitle>
@@ -3068,20 +2997,20 @@ export default function AdminPanel() {
               <form onSubmit={handleAddBarangay} className="flex gap-4 mb-8 p-4 bg-gray-50 rounded-xl border border-gray-100">
                 <div className="flex-1 space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-gray-500">Location Code</Label>
-                  <Input 
-                    placeholder="e.g. 0001" 
-                    value={newBarangayCode} 
-                    onChange={(e) => setNewBarangayCode(e.target.value)} 
-                    required 
+                  <Input
+                    placeholder="e.g. 0001"
+                    value={newBarangayCode}
+                    onChange={(e) => setNewBarangayCode(e.target.value)}
+                    required
                   />
                 </div>
                 <div className="flex-[2] space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-gray-500">Barangay Name</Label>
-                  <Input 
-                    placeholder="e.g. Batong Buhay" 
-                    value={newBarangayName} 
-                    onChange={(e) => setNewBarangayName(e.target.value)} 
-                    required 
+                  <Input
+                    placeholder="e.g. Batong Buhay"
+                    value={newBarangayName}
+                    onChange={(e) => setNewBarangayName(e.target.value)}
+                    required
                   />
                 </div>
                 <div className="flex items-end">
@@ -3104,9 +3033,9 @@ export default function AdminPanel() {
                         <TableCell className="font-mono">{b.code}</TableCell>
                         <TableCell className="font-medium">{b.name}</TableCell>
                         <TableCell className="text-right">
-                          <Button 
-                            variant="ghost" 
-                            size="icon" 
+                          <Button
+                            variant="ghost"
+                            size="icon"
                             className="text-red-500 hover:text-red-600 hover:bg-red-50"
                             onClick={() => handleDeleteBarangay(b.id)}
                           >
@@ -3127,7 +3056,7 @@ export default function AdminPanel() {
           </Card>
         )}
 
-        {activeSettingsTab === 'manage-data' && user?.username?.toLowerCase() === 'manlie' && (
+        {activeSettingsTab === 'manage-data' && user?.username.toLowerCase() === 'manlie' && (
           <div className="space-y-6">
             <Card className="border-red-200 shadow-sm">
               <CardHeader className="bg-red-50 border-b border-red-100">
@@ -3174,7 +3103,7 @@ export default function AdminPanel() {
                 <div className="border-t border-gray-200 pt-6 space-y-4">
                   <div>
                     <h3 className="text-sm font-semibold text-gray-900">Factory Reset</h3>
-                    <p className="text-sm text-gray-500">Wipe all data from the system. This deletes all users (except Manlie), properties, assessments, payments, and logs.</p>
+                    <p className="text-sm text-gray-500">Wipe all data from the system. This deletes all users (except Manlie account), properties, assessments, payments, and logs.</p>
                   </div>
                   <Button
                     variant="destructive"
@@ -3210,6 +3139,30 @@ export default function AdminPanel() {
             <CardContent className="py-12 text-center">
               <Settings className="w-12 h-12 text-gray-200 mx-auto mb-4" />
               <p className="text-gray-400 italic">Module under development</p>
+            </CardContent>
+          </Card>
+        )}
+
+        {activeSettingsTab === 'queue-kiosk' && (
+          <Card className="border-none shadow-sm">
+            <CardHeader>
+              <CardTitle>Queue Kiosk</CardTitle>
+              <CardDescription>Open the taxpayer registration kiosk interface.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-8 text-center space-y-4">
+                <Users className="w-16 h-16 text-blue-600 mx-auto" />
+                <div className="space-y-2">
+                  <h3 className="text-xl font-bold text-gray-900">Taxpayer Queueing System</h3>
+                  <p className="text-gray-500 max-w-sm mx-auto">Launch the kiosk mode in a new browser window for taxpayers to register and join the queue.</p>
+                </div>
+                <Button
+                  onClick={() => window.open('/queue', '_blank')}
+                  className="bg-blue-600 hover:bg-blue-700 shadow-lg px-8 h-12 text-lg font-bold"
+                >
+                  Launch Kiosk Mode
+                </Button>
+              </div>
             </CardContent>
           </Card>
         )}
@@ -3258,9 +3211,7 @@ export default function AdminPanel() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
-                {rptarSearchResults
-                  .filter(prop => rptarSelectedPropertyId ? prop.id === rptarSelectedPropertyId : true)
-                  .map((prop) => (
+                {rptarSearchResults.map((prop) => (
                   <tr
                     key={prop.id}
                     className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
@@ -3271,6 +3222,13 @@ export default function AdminPanel() {
                         <div className="flex flex-col gap-1 items-start">
                           <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
                             {prop.linked_taxpayer}
+                            <button
+                              onClick={(e) => handleUnlinkSingle(e, prop.id, true)}
+                              className="ml-1 p-0.5 hover:bg-green-200 rounded-full text-green-800 transition-colors"
+                              title="Unlink property"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
                           </span>
                           {prop.remarks && (
                             <span className="text-[10px] text-orange-600 font-semibold bg-orange-50 px-2 py-0.5 rounded border border-orange-100">
@@ -3627,37 +3585,16 @@ export default function AdminPanel() {
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-blue-100 text-sm font-medium">
-                  {abstractSelectedCollectorId !== 'all' ? (users.find(u => u.id.toString() === abstractSelectedCollectorId)?.full_name + "'s ") : 'Daily Global '}
-                  Collection
-                </p>
+                <p className="text-blue-100 text-sm font-medium">Total Collected</p>
                 <h3 className="text-2xl font-bold mt-1">₱ {abstractSummary.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h3>
               </div>
               <div className="p-3 bg-white/10 rounded-xl">
-                <Globe className="w-6 h-6 text-white" />
+                <CreditCard className="w-6 h-6 text-white" />
               </div>
             </div>
-            <p className="text-xs text-blue-200 mt-4 italic font-medium">as of {abstractSelectedDate ? new Date(abstractSelectedDate).toLocaleDateString() : new Date().toLocaleDateString()}</p>
+            <p className="text-xs text-blue-200 mt-4">For current search/filter</p>
           </CardContent>
         </Card>
-
-        {/* Show individual total only for Manlie (or any admin who is also a collector) */}
-        {user?.username.toLowerCase() === 'manlie' && (
-          <Card className="border-none shadow-sm bg-indigo-600 text-white">
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-indigo-100 text-sm font-medium">My Collection (Today)</p>
-                  <h3 className="text-2xl font-bold mt-1">₱ {abstractSummary.myTotalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h3>
-                </div>
-                <div className="p-3 bg-white/10 rounded-xl">
-                  <CreditCard className="w-6 h-6 text-white" />
-                </div>
-              </div>
-              <p className="text-xs text-indigo-200 mt-4 italic font-medium">My collections today only</p>
-            </CardContent>
-          </Card>
-        )}
 
         <Card className="border-none shadow-sm bg-white">
           <CardContent className="pt-6">
@@ -3709,8 +3646,8 @@ export default function AdminPanel() {
 
       <Card className="border-none shadow-sm">
         <CardContent className="p-0">
-          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/30 flex flex-wrap gap-4 items-center no-print">
-            <div className="relative min-w-[300px] flex-1">
+          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/30 flex justify-between items-center no-print">
+            <div className="relative max-w-md flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <Input
                 placeholder="Search OR No, PIN, or Taxpayer..."
@@ -3724,45 +3661,9 @@ export default function AdminPanel() {
                 }}
               />
             </div>
-
-            <div className="flex items-center gap-2">
-              <Label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider whitespace-nowrap">Collector</Label>
-              <Select value={abstractSelectedCollectorId} onValueChange={setAbstractSelectedCollectorId}>
-                <SelectTrigger className="w-[180px] h-10 bg-white border-gray-200">
-                  <SelectValue placeholder="All Collectors" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All Collectors</SelectItem>
-                  {users.filter(u => u.role === 'collector' || u.username.toLowerCase() === 'manlie').map(u => (
-                    <SelectItem key={u.id} value={u.id.toString()}>{u.full_name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider whitespace-nowrap">Specific Date</Label>
-              <Input
-                type="date"
-                className="w-[160px] h-10 bg-white border-gray-200"
-                value={abstractSelectedDate}
-                onChange={(e) => setAbstractSelectedDate(e.target.value)}
-              />
-              {abstractSelectedDate && (
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  className="h-10 px-2 text-gray-400 hover:text-red-500"
-                  onClick={() => setAbstractSelectedDate('')}
-                >
-                  <X className="w-4 h-4" />
-                </Button>
-              )}
-            </div>
-
-            <Button variant="outline" onClick={() => window.print()} className="gap-2 h-10 border-gray-200">
+            <Button variant="outline" onClick={() => window.print()} className="ml-4 gap-2">
               <Printer className="w-4 h-4" />
-              Print
+              Print Abstract
             </Button>
           </div>
           <div className="overflow-x-auto print-area">
@@ -3931,71 +3832,71 @@ export default function AdminPanel() {
               {taxpayerLogs
                 .filter(log => showLogPinsModal && selectedLogId !== null ? log.id === selectedLogId : true)
                 .map(log => (
-                <TableRow key={log.id}>
-                  <TableCell className="font-medium">{log.taxpayer_name}</TableCell>
-                  <TableCell>
-                    <button
-                      className="text-blue-600 hover:underline font-medium"
-                      onClick={() => {
-                        try {
-                          const pins = JSON.parse(log.pins);
-                          setSelectedLogPins(pins);
-                          setShowLogPinsModal(true);
-                          setSelectedLogId(log.id);
-                          setIsLoadingLogProperties(true);
-                          fetch('/api/properties/by-pins', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ pins })
-                          })
-                            .then(res => res.json())
-                            .then(data => {
-                              if (Array.isArray(data)) {
-                                setSelectedLogProperties(data);
-                              } else {
+                  <TableRow key={log.id}>
+                    <TableCell className="font-medium">{log.taxpayer_name}</TableCell>
+                    <TableCell>
+                      <button
+                        className="text-blue-600 hover:underline font-medium"
+                        onClick={() => {
+                          try {
+                            const pins = JSON.parse(log.pins);
+                            setSelectedLogPins(pins);
+                            setShowLogPinsModal(true);
+                            setSelectedLogId(log.id);
+                            setIsLoadingLogProperties(true);
+                            fetch('/api/properties/by-pins', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ pins })
+                            })
+                              .then(res => res.json())
+                              .then(data => {
+                                if (Array.isArray(data)) {
+                                  setSelectedLogProperties(data);
+                                } else {
+                                  setSelectedLogProperties([]);
+                                }
+                              })
+                              .catch(err => {
+                                console.error('Failed to fetch properties by pins', err);
                                 setSelectedLogProperties([]);
-                              }
-                            })
-                            .catch(err => {
-                              console.error('Failed to fetch properties by pins', err);
-                              setSelectedLogProperties([]);
-                            })
-                            .finally(() => {
-                              setIsLoadingLogProperties(false);
-                            });
-                        } catch (e) {
-                          console.error('Failed to parse pins', e);
-                        }
-                      }}
-                    >
-                      {(() => {
-                        try {
-                          return JSON.parse(log.pins).length;
-                        } catch (e) {
-                          return 0;
-                        }
-                      })()} PINs
-                    </button>
-                  </TableCell>
-                  <TableCell className="text-gray-500">
-                    {log.time_in ? (() => {
-                      let dateStr = log.time_in;
-                      if (typeof dateStr === 'string' && !dateStr.includes('Z') && !dateStr.includes('+')) dateStr = dateStr.replace(' ', 'T') + 'Z';
-                      return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-                    })() : '---'}
-                  </TableCell>
-                  <TableCell className="text-gray-500">
-                    {log.time_out ? (() => {
-                      let dateStr = log.time_out;
-                      if (typeof dateStr === 'string' && !dateStr.includes('Z') && !dateStr.includes('+')) dateStr = dateStr.replace(' ', 'T') + 'Z';
-                      return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-                    })() : <span className="text-green-600 font-bold text-xs uppercase tracking-wider bg-green-100 px-2 py-1 rounded-full">Active</span>}
-                  </TableCell>
-                  <TableCell className="text-gray-600">
-                    {log.user_name} <span className="text-xs text-gray-400">({log.role})</span>
-                  </TableCell>
-                </TableRow>
-              ))}
+                              })
+                              .finally(() => {
+                                setIsLoadingLogProperties(false);
+                              });
+                          } catch (e) {
+                            console.error('Failed to parse pins', e);
+                          }
+                        }}
+                      >
+                        {(() => {
+                          try {
+                            return JSON.parse(log.pins).length;
+                          } catch (e) {
+                            return 0;
+                          }
+                        })()} PINs
+                      </button>
+                    </TableCell>
+                    <TableCell className="text-gray-500">
+                      {log.time_in ? (() => {
+                        let dateStr = log.time_in;
+                        if (typeof dateStr === 'string' && !dateStr.includes('Z') && !dateStr.includes('+')) dateStr = dateStr.replace(' ', 'T') + 'Z';
+                        return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+                      })() : '---'}
+                    </TableCell>
+                    <TableCell className="text-gray-500">
+                      {log.time_out ? (() => {
+                        let dateStr = log.time_out;
+                        if (typeof dateStr === 'string' && !dateStr.includes('Z') && !dateStr.includes('+')) dateStr = dateStr.replace(' ', 'T') + 'Z';
+                        return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+                      })() : <span className="text-green-600 font-bold text-xs uppercase tracking-wider bg-green-100 px-2 py-1 rounded-full">Active</span>}
+                    </TableCell>
+                    <TableCell className="text-gray-600">
+                      {log.user_name} <span className="text-xs text-gray-400">({log.role})</span>
+                    </TableCell>
+                  </TableRow>
+                ))}
             </TableBody>
           </Table>
         </div>
@@ -4064,9 +3965,8 @@ export default function AdminPanel() {
   );
 
   const renderDelinquencyReport = () => {
-    const filteredData = delinquencyBarangay === 'all' 
-      ? delinquencyData 
-      : delinquencyData.filter(d => d.barangay === delinquencyBarangay);
+    // Data is already filtered by the server if requested
+    const filteredData = delinquencyData;
 
     const totalBasic = filteredData.reduce((sum, d) => sum + (d.basic || 0), 0);
     const totalSEF = filteredData.reduce((sum, d) => sum + (d.sef || 0), 0);
@@ -4076,170 +3976,181 @@ export default function AdminPanel() {
 
     return (
       <div className="space-y-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 no-print">
-          <div className="flex items-center gap-4">
-            <Select 
-              value={delinquencyReportType} 
-              onValueChange={(v: any) => setDelinquencyReportType(v)}
-            >
-              <SelectTrigger className="w-[200px]">
-                <SelectValue placeholder="Report Type" />
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 no-print bg-slate-50 p-4 rounded-xl border border-slate-200">
+          <div className="flex flex-wrap items-center gap-3">
+            <Select value={delinquencyReportType} onValueChange={setDelinquencyReportType}>
+              <SelectTrigger className="w-[180px] bg-white">
+                <SelectValue placeholder="Type" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="5year">5-Year Delinquency</SelectItem>
-                <SelectItem value="actual">Actual Delinquency</SelectItem>
+                <SelectItem value="5year">5-Year Report</SelectItem>
+                <SelectItem value="actual">Actual Report</SelectItem>
               </SelectContent>
             </Select>
 
-            <Select 
-              value={delinquencyBarangay} 
-              onValueChange={setDelinquencyBarangay}
-            >
-              <SelectTrigger className="w-[180px]">
+            <Select value={delinquencyBarangay} onValueChange={setDelinquencyBarangay}>
+              <SelectTrigger className="w-[200px] bg-white">
                 <SelectValue placeholder="Barangay" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="all">Consolidated (All)</SelectItem>
                 {barangays.map(b => (
-                  <SelectItem key={b.code} value={b.name}>{b.name}</SelectItem>
+                  <SelectItem key={b.code} value={b.code}>{b.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
 
-            <Select 
-              value={delinquencyInterestMode} 
-              onValueChange={(v: any) => setDelinquencyInterestMode(v)}
-            >
-              <SelectTrigger className="w-[180px]">
-                <SelectValue placeholder="Amount Mode" />
+            <Select value={delinquencyInterestMode} onValueChange={(v: any) => setDelinquencyInterestMode(v)}>
+              <SelectTrigger className="w-[160px] bg-white">
+                <SelectValue placeholder="Interest Mode" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="with">With Interest</SelectItem>
-                <SelectItem value="without">Without Interest</SelectItem>
+                <SelectItem value="without">Principal Only</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={fetchDelinquencyReport} disabled={isDelinquencyLoading}>
+            <Button variant="default" onClick={fetchDelinquencyReport} disabled={isDelinquencyLoading} className="bg-blue-600 hover:bg-blue-700 shadow-sm">
               <History className={`w-4 h-4 mr-2 ${isDelinquencyLoading ? 'animate-spin' : ''}`} />
-              Refresh
+              Generate Report
             </Button>
-            <Button variant="default" onClick={() => window.print()}>
-              <Printer className="w-4 h-4 mr-2" />
-              Print
-            </Button>
+            {delinquencyReportGenerated && (
+              <Button variant="outline" onClick={() => window.print()} className="bg-white">
+                <Printer className="w-4 h-4 mr-2" />
+                Print
+              </Button>
+            )}
           </div>
         </div>
 
-        <Card className="print-area">
-          <CardHeader className="text-center pt-8 border-b border-gray-100 pb-8">
-            <CardTitle className="text-2xl font-bold tracking-tight">
-              {delinquencyReportType === '5year' ? '5-YEAR' : 'ACTUAL'} DELINQUENCY REPORT
-            </CardTitle>
-            <CardDescription className="text-sm font-medium mt-2">
-              {delinquencyBarangay === 'all' ? 'CONSOLIDATED REPORT (ALL BARANGAYS)' : `BARANGAY: ${delinquencyBarangay.toUpperCase()}`}
-            </CardDescription>
-            <div className="mt-4 text-xs text-gray-400 font-mono">
-              Generated on {new Date().toLocaleString()}
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            {isDelinquencyLoading ? (
-              <div className="text-center py-24">
-                <Loader2 className="w-8 h-8 animate-spin mx-auto text-blue-600 mb-4" />
-                <p className="text-gray-500 font-medium tracking-wide">Calculating delinquency data...</p>
-                <p className="text-xs text-gray-400 mt-2">This may take a moment depending on the volume of records</p>
+        {!delinquencyReportGenerated && !isDelinquencyLoading && (
+          <Card className="border-dashed border-2">
+            <CardContent className="py-24 text-center">
+              <AlertTriangle className="w-12 h-12 text-gray-200 mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-gray-900">No Report Generated</h3>
+              <p className="text-gray-500 max-w-sm mx-auto mt-2">
+                Select the report type and barangay above, then click <strong>Generate Report</strong> to view delinquent accounts.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {(isDelinquencyLoading || delinquencyReportGenerated) && (
+          <Card className="print-area">
+            <CardHeader className="text-center pt-8 border-b border-gray-100 pb-8">
+              <CardTitle className="text-3xl font-black tracking-tighter text-slate-900">
+                {delinquencyReportType === '5year' ? '5-YEAR' : 'ACTUAL'} DELINQUENCY REPORT
+              </CardTitle>
+              <CardDescription className="text-sm font-bold mt-2 text-slate-500">
+                {delinquencyBarangay === 'all'
+                  ? 'CONSOLIDATED REPORT (ALL BARANGAYS)'
+                  : `BARANGAY: ${barangays.find(b => b.code === delinquencyBarangay)?.name?.toUpperCase() || ''}`}
+              </CardDescription>
+              <div className="mt-4 text-xs text-gray-400 font-mono">
+                Generated on {new Date().toLocaleString()}
               </div>
-            ) : filteredData.length === 0 ? (
-              <div className="text-center py-24 text-gray-400 flex flex-col items-center gap-3">
-                <CheckCircle className="w-12 h-12 text-gray-100" />
-                <p className="font-medium">No delinquent accounts found for the current selection.</p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <Table className="w-full">
-                  <TableHeader className="bg-gray-50/50">
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b w-[180px]">PIN</TableHead>
-                      <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b">Registered Owner</TableHead>
-                      <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b">Lot#</TableHead>
-                      <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b">Area (sq.m)</TableHead>
-                      <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b">Year Covered</TableHead>
-                      <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b text-right">Basic (₱)</TableHead>
-                      <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b text-right">SEF (₱)</TableHead>
-                      {delinquencyInterestMode === 'with' && (
-                        <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b text-right">Interest (₱)</TableHead>
-                      )}
-                      <TableHead className="py-4 text-[10px] font-bold uppercase tracking-wider text-gray-500 border-b text-right pr-6">
-                        {delinquencyInterestMode === 'with' ? 'Total (₱)' : 'Principal (₱)'}
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredData.map((d, i) => (
-                      <TableRow key={i} className="hover:bg-gray-50/50 border-b last:border-0">
-                        <TableCell className="font-mono text-[11px] py-4 text-gray-700">{d.pin}</TableCell>
-                        <TableCell className="font-semibold text-gray-900 py-4 underline underline-offset-4 decoration-gray-100">{d.registered_owner}</TableCell>
-                        <TableCell className="text-gray-600 py-4">{d.lot_no || '-'}</TableCell>
-                        <TableCell className="text-gray-600 py-4">{d.area || '-'}</TableCell>
-                        <TableCell className="text-gray-600 py-4">
-                          <span className="px-2 py-1 rounded bg-orange-50 text-orange-700 text-[10px] font-bold border border-orange-100">
-                            {d.year_covered}
-                          </span>
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-[11px] text-gray-600 py-4">
-                          {parseFloat(String(d.basic || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-[11px] text-gray-600 py-4">
-                          {parseFloat(String(d.sef || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        </TableCell>
+            </CardHeader>
+            <CardContent className="p-0">
+              {isDelinquencyLoading ? (
+                <div className="text-center py-24">
+                  <Loader2 className="w-8 h-8 animate-spin mx-auto text-blue-600 mb-4" />
+                  <p className="text-gray-500 font-medium tracking-wide">Calculating delinquency data...</p>
+                  <p className="text-xs text-gray-400 mt-2">This may take a moment depending on the volume of records</p>
+                </div>
+              ) : filteredData.length === 0 ? (
+                <div className="text-center py-24 text-gray-400 flex flex-col items-center gap-3">
+                  <CheckCircle className="w-12 h-12 text-gray-100" />
+                  <p className="font-medium">No delinquent accounts found for the current selection.</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table className="w-full">
+                    <TableHeader className="bg-gray-50/50">
+                      <TableRow className="hover:bg-transparent border-b-2 border-slate-200 bg-slate-50/50">
+                        <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800 w-[140px]">PIN</TableHead>
+                        <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800">Registered Owner</TableHead>
+                        <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800 w-[70px] text-center px-1">Lot No.</TableHead>
+                        <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800 w-[70px] text-right px-1">Area (sq.m)</TableHead>
+                        <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800 w-[120px] text-center">Year Covered</TableHead>
+                        <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800 w-[110px] text-right">Basic Tax</TableHead>
+                        <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800 w-[110px] text-right">SEF Tax</TableHead>
                         {delinquencyInterestMode === 'with' && (
-                          <TableCell className="text-right font-mono text-[11px] text-gray-600 py-4">
-                            {parseFloat(String(d.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          </TableCell>
+                          <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800 w-[110px] text-right">Interest</TableHead>
                         )}
-                        <TableCell className="text-right font-bold font-mono text-gray-900 py-4 pr-6">
-                          <span className="flex items-center justify-end">
-                            <span className={`mr-1 ${delinquencyInterestMode === 'without' ? 'invisible' : ''}`}>(</span>
-                            {(delinquencyInterestMode === 'with' ? d.amount : d.principal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            <span className={`ml-1 ${delinquencyInterestMode === 'without' ? 'invisible' : ''}`}>)</span>
-                          </span>
-                        </TableCell>
+                        <TableHead className="py-4 text-sm font-bold uppercase tracking-tight text-slate-800 w-[130px] text-right pr-8">Total</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-                
-                <div className="p-8 bg-gray-50 border-t border-gray-100 flex flex-wrap justify-end gap-x-12 gap-y-4">
-                  <div className="text-right">
-                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Basic</p>
-                    <p className="text-sm font-bold text-gray-600 font-mono">₱{totalBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total SEF</p>
-                    <p className="text-sm font-bold text-gray-600 font-mono">₱{totalSEF.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-                  </div>
-                  {delinquencyInterestMode === 'with' && (
-                    <div className="text-right">
-                      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Interest</p>
-                      <p className="text-sm font-bold text-gray-600 font-mono">₱{totalInterest.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredData.map((d, i) => (
+                        <TableRow key={i} className="hover:bg-slate-50/30 border-b border-slate-100 last:border-0">
+                          <TableCell className="text-[11px] font-mono py-4 text-slate-500 tracking-tighter whitespace-nowrap">{d.pin}</TableCell>
+                          <TableCell className="text-[13px] py-4 text-slate-900 font-semibold tracking-tight">{d.registered_owner}</TableCell>
+                          <TableCell className="text-xs py-4 text-slate-600 text-center px-1">{d.lot_no || '-'}</TableCell>
+                          <TableCell className="text-xs py-4 text-slate-600 text-right px-1">{d.area || '-'}</TableCell>
+                          <TableCell className="text-[12px] py-4 text-slate-600 text-center font-medium">
+                            {d.year_covered}
+                          </TableCell>
+                          <TableCell className="text-right text-[12px] text-slate-600 py-4 font-mono">
+                            {parseFloat(String(d.basic || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                          </TableCell>
+                          <TableCell className="text-right text-[12px] text-slate-600 py-4 font-mono">
+                            {parseFloat(String(d.sef || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                          </TableCell>
+                          {delinquencyInterestMode === 'with' && (
+                            <TableCell className="text-right text-[12px] text-slate-600 py-4 font-mono">
+                              {parseFloat(String(d.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </TableCell>
+                          )}
+                          <TableCell className="text-right text-[13px] font-bold text-slate-900 py-4 pr-8 font-mono">
+                            {(delinquencyInterestMode === 'with' ? d.amount : d.principal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+
+                  <div className="p-8 bg-slate-50 border-t-2 border-slate-100 flex flex-wrap justify-between items-end gap-x-12 gap-y-8">
+                    <div className="flex gap-12">
+                      <div className="text-left">
+                        <p className="text-[10px] font-bold text-slate-400 border-b border-slate-200 pb-1 mb-2 uppercase tracking-widest">Prepared by:</p>
+                        <div className="mt-6 border-b border-slate-900 w-48 h-px"></div>
+                        <p className="text-sm font-bold mt-1 uppercase">Municipal Assessor</p>
+                      </div>
                     </div>
-                  )}
-                  <div className="text-right border-l border-gray-200 pl-12">
-                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">
-                      {delinquencyInterestMode === 'with' ? 'Grand Total' : 'Total Principal'}
-                    </p>
-                    <div className="text-3xl font-black text-gray-900 font-mono tracking-tight flex items-baseline justify-end gap-2">
-                      <span className="text-lg font-normal text-gray-400">₱</span>
-                      <span>{(delinquencyInterestMode === 'with' ? totalAmount : totalPrincipal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+
+                    <div className="flex flex-wrap justify-end gap-x-12 gap-y-4">
+                      <div className="text-right">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Basic Tax</p>
+                        <p className="text-sm font-semibold text-slate-900"> {totalBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total SEF Tax</p>
+                        <p className="text-sm font-semibold text-slate-900"> {totalSEF.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                      </div>
+                      {delinquencyInterestMode === 'with' && (
+                        <div className="text-right">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Interest</p>
+                          <p className="text-sm font-semibold text-slate-900"> {totalInterest.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                        </div>
+                      )}
+                      <div className="text-right border-l-2 border-slate-200 pl-12 bg-white p-4 rounded-lg shadow-sm">
+                        <p className="text-[11px] font-black text-slate-500 uppercase tracking-tighter mb-1">
+                          {delinquencyInterestMode === 'with' ? 'GRAND TOTAL' : 'TOTAL PRINCIPAL'}
+                        </p>
+                        <div className="text-4xl font-black text-slate-900 tracking-tighter flex items-baseline justify-end gap-2">
+                          <span className="text-sm font-bold">₱</span>
+                          <span>{(delinquencyInterestMode === 'with' ? totalAmount : totalPrincipal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
     );
   };
@@ -4257,6 +4168,7 @@ export default function AdminPanel() {
       case 'erptaas': return renderErptaas();
       case 'settings': return renderSettings();
       case 'delinquency-report': return renderDelinquencyReport();
+      case 'queue-management': return <QueueManagement />;
       default: return renderRPTAR();
     }
   };
@@ -4287,8 +4199,8 @@ export default function AdminPanel() {
                         }
                       }}
                       className={`w-full flex items-center justify-between px-4 py-3 text-sm transition-all ${activeTab === item.id
-                          ? 'bg-blue-600 text-white'
-                          : 'text-gray-700 hover:bg-gray-50'
+                        ? 'bg-blue-600 text-white'
+                        : 'text-gray-700 hover:bg-gray-50'
                         }`}
                     >
                       <div className="flex items-center gap-3">
@@ -4342,7 +4254,7 @@ export default function AdminPanel() {
               </Button>
             </div>
           )}
-          {activeTab === 'rpt-abstract' && user?.username?.toLowerCase() === 'manlie' && (
+          {activeTab === 'rpt-abstract' && user?.username === 'Manlie' && (
             <div className="flex items-center gap-3">
               <label className="cursor-pointer">
                 <input

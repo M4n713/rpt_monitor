@@ -49,7 +49,6 @@
     "@types/node": "^22.14.0",
     "@types/pg": "^8.18.0",
     "autoprefixer": "^10.4.21",
-    "selfsigned": "^5.5.0",
     "shadcn": "^3.8.5",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",

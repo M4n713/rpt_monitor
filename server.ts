@@ -13,8 +13,6 @@ import multer from 'multer';
 import { Readable } from 'stream';
 import csvParser from 'csv-parser';
 import fs from 'fs';
-import https from 'https';
-import { generate as generateSelfSigned } from 'selfsigned';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -22,7 +20,7 @@ let cachedBarangays: { code: string, name: string }[] = [];
 
 const updateBarangayCache = async () => {
   try {
-    const { rows } = await dbQuery('SELECT code, name FROM barangays ORDER BY name ASC');
+    const { rows } = await dbQuery('SELECT code, name FROM barangays ORDER BY code ASC');
     cachedBarangays = rows;
   } catch (err) {
     // If table doesn't exist yet, use initial hardcoded list
@@ -63,6 +61,68 @@ const getLocationFromPin = (pin: string) => {
   const locationCode = parts[2];
   const b = cachedBarangays.find(br => br.code === locationCode);
   return b ? b.name : 'Unknown Location';
+};
+
+// --- SEMAPHORE SMS API CONFIGURATION ---
+// Using API Key: 4c1082647be5c07e8019fbce60d45d2b
+const SEMAPHORE_API_KEY = process.env.SEMAPHORE_API_KEY || '4c1082647be5c07e8019fbce60d45d2b'; 
+const SEMAPHORE_SENDER_NAME = process.env.SEMAPHORE_SENDER_NAME || ''; // Optional: set if you have an approved sender name
+
+const TELCO_PREFIXES = {
+  'Smart/TNT/Sun': ['0907','0908','0909','0910','0912','0918','0919','0920','0921','0928','0929','0930','0931','0932','0933','0934','0938','0939','0940','0941','0942','0943','0946','0947','0948','0949','0950','0951','0960','0961','0963','0964','0968','0969','0970','0981','0989','0998','0999','0922','0923','0925'],
+  'Globe/TM': ['0905','0906','0915','0916','0917','0926','0927','0935','0936','0937','0945','0953','0954','0955','0956','0965','0966','0967','0973','0975','0976','0977','0978','0979','0980','0994','0995','0996','0997'],
+  'DITO': ['0991','0992','0993'],
+  'GOMO': ['0976']
+};
+
+const getTelco = (phone: string) => {
+  if (!phone) return 'Unknown';
+  const clean = phone.replace(/[^0-9]/g, '');
+  const prefix = clean.startsWith('63') ? '0' + clean.substring(2, 5) : clean.substring(0, 4);
+  
+  for (const [name, prefixes] of Object.entries(TELCO_PREFIXES)) {
+    if (prefixes.includes(prefix)) return name;
+  }
+  return 'Local/Other';
+};
+// --------------------------------------------
+
+const sendSMS = async (to: string, message: string) => {
+  if (!to || !message) return;
+  
+  const formattedPhone = to.startsWith('09') ? to : (to.startsWith('63') ? '0' + to.substring(2) : to);
+  const telco = getTelco(formattedPhone);
+
+  console.log('--- SENT SMS (SEMAPHORE) ---');
+  console.log(`TO: ${formattedPhone} (${telco})`);
+  console.log(`MSG: ${message}`);
+  console.log('----------------------------');
+
+  try {
+    const params = new URLSearchParams();
+    params.append('apikey', SEMAPHORE_API_KEY);
+    params.append('number', formattedPhone);
+    params.append('message', message);
+    if (SEMAPHORE_SENDER_NAME) params.append('sendername', SEMAPHORE_SENDER_NAME);
+
+    const response = await fetch(`https://api.semaphore.co/api/v4/messages`, {
+      method: 'POST',
+      body: params
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      console.log('[SEMAPHORE SUCCESS]', data);
+      return true;
+    } else {
+      const errorText = await response.text();
+      console.error(`[SEMAPHORE ERROR] Status: ${response.status}`, errorText);
+      return false;
+    }
+  } catch (err: any) {
+    console.warn(`[SEMAPHORE FAILED] Network error connecting to Semaphore. ${err.message}`);
+    return false;
+  }
 };
 dotenv.config({ path: path.resolve(__dirname, '.env') });
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-key-change-in-prod';
@@ -316,11 +376,17 @@ const initDb = async (retries = 1, delay = 1000) => {
           id SERIAL PRIMARY KEY,
           username TEXT UNIQUE NOT NULL,
           password TEXT NOT NULL,
-          role TEXT NOT NULL CHECK(role IN ('taxpayer', 'collector', 'admin')),
+          role TEXT NOT NULL CHECK(role IN ('taxpayer', 'collector', 'admin', 'queue')),
           full_name TEXT NOT NULL,
+          age INTEGER,
+          gender TEXT,
+          phone_number TEXT,
           last_active_at TIMESTAMPTZ,
           assigned_collector_id INTEGER REFERENCES users(id),
           queue_number INTEGER,
+          queue_date DATE,
+          notified BOOLEAN DEFAULT FALSE,
+          notified_at TIMESTAMPTZ,
           login_level INTEGER DEFAULT 1
         );
 
@@ -339,8 +405,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           last_payment_date TIMESTAMPTZ,
           total_area TEXT,
           ownership_type TEXT CHECK(ownership_type IN ('full', 'shared')),
-          claimed_area TEXT,
-          property_status TEXT DEFAULT 'active'
+          claimed_area TEXT
         );
 
         CREATE TABLE IF NOT EXISTS property_owners (
@@ -419,6 +484,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           pins TEXT NOT NULL,
           time_in TIMESTAMPTZ NOT NULL,
           time_out TIMESTAMPTZ,
+          remarks TEXT,
           created_at TIMESTAMPTZ NOT NULL
         );
 
@@ -452,6 +518,20 @@ const initDb = async (retries = 1, delay = 1000) => {
             ALTER TABLE taxpayer_logs ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at AT TIME ZONE 'UTC';
             ALTER TABLE login_patterns ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at AT TIME ZONE 'UTC';
             ALTER TABLE inquiries ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at AT TIME ZONE 'UTC';
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS notified BOOLEAN DEFAULT FALSE;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS queue_date DATE;
+            ALTER TABLE taxpayer_logs ADD COLUMN IF NOT EXISTS remarks TEXT;
+            -- Update role constraint if needed
+            BEGIN
+              ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+              ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('taxpayer', 'collector', 'admin', 'queue'));
+            EXCEPTION WHEN OTHERS THEN 
+              -- Might already be updated or not supported
+            END;
         EXCEPTION WHEN OTHERS THEN 
             -- Tables might not exist yet or columns already have types, ignore errors in script
         END $$;
@@ -478,10 +558,6 @@ const initDb = async (retries = 1, delay = 1000) => {
         ALTER TABLE payments ALTER COLUMN collector_id DROP NOT NULL;
       `).catch(e => console.log('Alter table collector_id failed:', e.message));
 
-      await dbQuery(`
-        ALTER TABLE properties ADD COLUMN IF NOT EXISTS property_status TEXT DEFAULT 'active';
-      `).catch(e => console.log('Alter table properties property_status failed:', e.message));
-
       // Seed Barangays
       const { rows: bRows } = await dbQuery('SELECT COUNT(*) FROM barangays');
       if (parseInt(bRows[0].count) === 0) {
@@ -507,9 +583,18 @@ const initDb = async (retries = 1, delay = 1000) => {
       const manliePass = bcrypt.hashSync('admin123', 10);
       const { rows: manlieRows } = await dbQuery('SELECT * FROM users WHERE LOWER(username) = $1', ['manlie']);
       if (manlieRows.length === 0) {
-        await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie']);
+        await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie (Admin/Collector)']);
       } else {
-        await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [manliePass, 'admin', 'Manlie', 'manlie']);
+        await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [manliePass, 'admin', 'Manlie (Admin/Collector)', 'manlie']);
+      }
+
+      // Seed Treas
+      const treasPass = bcrypt.hashSync('Treas123', 10);
+      const { rows: treasRows } = await dbQuery('SELECT * FROM users WHERE LOWER(username) = $1', ['treas']);
+      if (treasRows.length === 0) {
+        await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['treas', treasPass, 'queue', 'Treasurer Queue Kiosk']);
+      } else {
+        await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [treasPass, 'queue', 'Treasurer Queue Kiosk', 'treas']);
       }
 
 
@@ -566,14 +651,7 @@ async function startServer() {
   app.use(express.json());
   app.use(cookieParser());
   app.use(cors({
-    origin: [
-      'https://ais-dev-r3ui3klxefzvgtuyiay6wk-345072871581.asia-southeast1.run.app', 
-      'http://localhost:3000', 
-      'http://100.65.168.30:3000',
-      'https://localhost:3000',
-      'https://100.84.4.41:3000',
-      'https://100.65.168.30:3000'
-    ],
+    origin: ['https://ais-dev-r3ui3klxefzvgtuyiay6wk-345072871581.asia-southeast1.run.app', 'http://localhost:3000', 'http://100.65.168.30:3000'],
     credentials: true
   }));
 
@@ -938,17 +1016,6 @@ async function startServer() {
 
       // Enrich properties with owner info
       const enrichedProperties = await Promise.all(properties.map(async p => {
-        const { rows: sameProps } = await dbQuery(`
-          SELECT SUM(assessed_value) as total_av 
-          FROM properties 
-          WHERE pin = $1 AND registered_owner_name = $2 AND property_status = 'active'
-        `, [p.pin, p.registered_owner_name]);
-
-        let combinedAssessedValue = parseFloat(p.assessed_value) || 0;
-        if (sameProps.length > 0 && sameProps[0].total_av) {
-          combinedAssessedValue = parseFloat(sameProps[0].total_av);
-        }
-
         const { rows: owners } = await dbQuery(`
           SELECT u.id, u.full_name, po.ownership_type, po.claimed_area 
           FROM property_owners po
@@ -964,7 +1031,6 @@ async function startServer() {
 
         return {
           ...p,
-          assessed_value: combinedAssessedValue, // Added aggregated value
           owners,
           linked_taxpayer: ownerNames || null,
           owner_id: primaryOwner?.id || null, // Primary owner ID for simple filters
@@ -987,12 +1053,7 @@ async function startServer() {
       if (!Array.isArray(pins) || pins.length === 0) {
         return res.json([]);
       }
-      const { rows } = await dbQuery(`
-        SELECT p.*, 
-          COALESCE((SELECT SUM(assessed_value) FROM properties p2 WHERE p2.pin = p.pin AND p2.registered_owner_name = p.registered_owner_name AND p2.property_status = 'active'), p.assessed_value) as assessed_value
-        FROM properties p 
-        WHERE pin = ANY($1)
-      `, [pins]);
+      const { rows } = await dbQuery(`SELECT * FROM properties WHERE pin = ANY($1)`, [pins]);
       res.json(rows);
     } catch (err) {
       console.error('Fetch properties by pins error:', err);
@@ -1000,26 +1061,8 @@ async function startServer() {
     }
   });
 
-  app.get('/api/properties/:id/payments', authenticateToken, async (req: any, res) => {
-    try {
-      const { rows } = await dbQuery(`
-        SELECT p.*, pr.pin, pr.registered_owner_name, u.full_name as collector_name, tp.full_name as taxpayer_name
-        FROM payments p
-        JOIN properties pr ON p.property_id = pr.id
-        LEFT JOIN users u ON p.collector_id = u.id
-        LEFT JOIN users tp ON p.taxpayer_id = tp.id
-        WHERE p.property_id = $1
-        ORDER BY p.payment_date DESC
-      `, [req.params.id]);
-      res.json(rows);
-    } catch (err) {
-      console.error('Fetch property payments error:', err);
-      res.status(500).json({ error: 'Failed to fetch property payments' });
-    }
-  });
-
   app.get('/api/admin/payments', authenticateToken, async (req: any, res) => {
-    if (req.user.role !== 'admin' && req.user.role !== 'collector') return res.status(403).json({ error: 'Forbidden' });
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     try {
       const { rows } = await dbQuery(`
         SELECT p.*, pr.pin, pr.registered_owner_name, u.full_name as collector_name, tp.full_name as taxpayer_name
@@ -1178,11 +1221,10 @@ async function startServer() {
           const { rows: tpRows } = await dbQuery('SELECT full_name FROM users WHERE id = $1', [taxpayer_id]);
           const taxpayerName = tpRows[0]?.full_name || 'Unknown';
 
-          const properUsername = req.user.username.charAt(0).toUpperCase() + req.user.username.slice(1).toLowerCase();
           await dbQuery(`
             INSERT INTO taxpayer_logs (taxpayer_id, taxpayer_name, role, user_id, user_name, pins, time_in, time_out, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8)
-          `, [taxpayer_id, taxpayerName, req.user.role, req.user.id, properUsername, JSON.stringify(linkedPins), new Date().toISOString(), new Date().toISOString()]);
+          `, [taxpayer_id, taxpayerName, req.user.role, req.user.id, req.user.name, JSON.stringify(linkedPins), new Date().toISOString(), new Date().toISOString()]);
         }
       }
  
@@ -1355,15 +1397,12 @@ async function startServer() {
               continue;
             }
 
-            const propertyStatus = (row.status || row.propertystatus || 'active').toString().trim().toLowerCase();
-            const normalizedPropertyStatus = propertyStatus === 'retired' ? 'retired' : 'active';
-
             try {
               // Insert new record
               await dbQuery(`
-                INSERT INTO properties (registered_owner_name, pin, td_no, lot_no, address, description, assessed_value, tax_due, status, total_area, property_status) 
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-              `, [registeredOwner, pin, tdNo, lotNo, null, description, assessedVal, taxDue, 'unpaid', row.area || null, normalizedPropertyStatus]);
+                INSERT INTO properties (registered_owner_name, pin, td_no, lot_no, address, description, assessed_value, tax_due, status, total_area) 
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+              `, [registeredOwner, pin, tdNo, lotNo, null, description, assessedVal, taxDue, 'unpaid', row.area || null]);
               successCount++;
             } catch (e: any) {
               errorCount++;
@@ -1383,12 +1422,10 @@ async function startServer() {
         }
       });
   });
-
   app.get('/api/users', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-    
     try {
-      const { rows } = await dbQuery('SELECT id, username, full_name, role, assigned_collector_id, queue_number, last_active_at FROM users ORDER BY id ASC');
+      const { rows } = await dbQuery('SELECT id, username, full_name, role, age, gender, phone_number, assigned_collector_id, queue_number, queue_date, notified, notified_at, last_active_at FROM users ORDER BY id ASC');
       res.json(rows);
     } catch (err) {
       console.error('Fetch users error:', err);
@@ -1396,14 +1433,157 @@ async function startServer() {
     }
   });
 
+  app.post('/api/collector/view-taxpayer', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'collector' && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const { taxpayer_id } = req.body;
+    if (!taxpayer_id) return res.status(400).json({ error: 'Taxpayer ID required' });
+
+    try {
+      const { rows: tpRows } = await dbQuery('SELECT full_name FROM users WHERE id = $1', [taxpayer_id]);
+      if (tpRows.length === 0) return res.status(404).json({ error: 'Taxpayer not found' });
+      const taxpayerName = tpRows[0].full_name;
+
+      // Check for open log
+      const { rows: openLogs } = await dbQuery(
+        'SELECT id FROM taxpayer_logs WHERE taxpayer_id = $1 AND user_id = $2 AND time_out IS NULL ORDER BY created_at DESC LIMIT 1',
+        [taxpayer_id, req.user.id]
+      );
+
+      if (openLogs.length === 0) {
+        // Create new log with time_in
+        await dbQuery(`
+          INSERT INTO taxpayer_logs (taxpayer_id, taxpayer_name, role, user_id, user_name, pins, time_in, time_out, created_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8)
+        `, [taxpayer_id, taxpayerName, req.user.role, req.user.id, (req.user as any).name, '[]', new Date().toISOString(), new Date().toISOString()]);
+
+        // AUTO-CALL: Send SMS if they are in the queue and not yet notified
+        const { rows: qRows } = await dbQuery('SELECT phone_number, queue_number, notified FROM users WHERE id = $1', [taxpayer_id]);
+        if (qRows.length > 0) {
+          const tp = qRows[0];
+          if (!tp.notified && tp.phone_number && tp.queue_number) {
+            const formattedNum = `RPT-${String(tp.queue_number).padStart(4, '0')}`;
+            const callerFirstName = req.user.name.split(' ')[0];
+            await sendSMS(tp.phone_number, `Hello ${taxpayerName}! You are NEXT (Number: ${formattedNum}). Please proceed to ${callerFirstName} now. Thank you!`);
+            await dbQuery('UPDATE users SET notified = TRUE, notified_at = $1 WHERE id = $2', [new Date().toISOString(), taxpayer_id]);
+          }
+        }
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Collector view taxpayer error:', err);
+      res.status(500).json({ error: 'Failed to record tracking' });
+    }
+  });
+
   app.get('/api/admin/taxpayers', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { rows } = await dbQuery('SELECT id, username, full_name, assigned_collector_id, last_active_at FROM users WHERE role = $1', ['taxpayer']);
+      const { rows } = await dbQuery('SELECT id, username, full_name, age, gender, queue_number, assigned_collector_id, last_active_at FROM users WHERE role = $1', ['taxpayer']);
       res.json(rows);
     } catch (err) {
       console.error('Fetch taxpayers error:', err);
       res.status(500).json({ error: 'Failed to fetch taxpayers' });
+    }
+  });
+
+  app.post('/api/queue/register', async (req, res) => {
+    try {
+      const { first_name, mi, last_name, age, gender, phone_number } = req.body;
+      if (!first_name || !last_name) return res.status(400).json({ error: 'First name and last name are required' });
+
+      const full_name = mi ? `${first_name} ${mi} ${last_name}` : `${first_name} ${last_name}`;
+      const currentDay = new Date().toISOString().split('T')[0];
+
+      // CHECK IF TAXPAYER ALREADY EXISTS (Re-queueing)
+      // Only match against existing TAXPAYERS to avoid collisions with admin/collector roles
+      let taxpayer;
+      const { rows: existingRows } = await dbQuery(
+        'SELECT id, username, full_name, role FROM users WHERE (phone_number = $1 OR full_name = $2) AND role = $3 LIMIT 1',
+        [phone_number, full_name, 'taxpayer']
+      );
+
+      // Latest daily queue number
+      const { rows: maxRows } = await dbQuery('SELECT MAX(queue_number) as max_num FROM users WHERE queue_date = $1', [currentDay]);
+      const nextNum = (maxRows[0].max_num || 0) + 1;
+      const formattedNum = `RPT-${String(nextNum).padStart(4, '0')}`;
+
+      if (existingRows.length > 0) {
+        // Re-queue existing user
+        taxpayer = existingRows[0];
+        await dbQuery(
+          'UPDATE users SET queue_number = $1, queue_date = $2, notified = FALSE, notified_at = NULL WHERE id = $3',
+          [nextNum, currentDay, taxpayer.id]
+        );
+      } else {
+        // Create new user (Generate username logic preserved)
+        let username = first_name.toLowerCase().replace(/\s+/g, '');
+        const { rows: collisionRows } = await dbQuery('SELECT id FROM users WHERE username = $1', [username]);
+        if (collisionRows.length > 0) {
+          username = `${username}${Math.floor(Math.random() * 9999)}`;
+        }
+        const hashedPassword = bcrypt.hashSync('taxpayer123', 10);
+        
+        const { rows: insertRows } = await dbQuery(
+          'INSERT INTO users (username, password, role, full_name, age, gender, phone_number, queue_number, queue_date) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, username, full_name, queue_number, phone_number',
+          [username, hashedPassword, 'taxpayer', full_name, age, gender, phone_number, nextNum, currentDay]
+        );
+        taxpayer = insertRows[0];
+      }
+
+      // Send Initial SMS
+      if (phone_number) {
+        sendSMS(phone_number, `Welcome ${full_name}! Your Queue Number is ${formattedNum}. Please wait for your turn. Thank you!`);
+      }
+
+      res.status(201).json({
+        message: existingRows.length > 0 ? 'Welcome back! You are re-queued' : 'Successfully queued',
+        user: taxpayer,
+        queue_label: formattedNum
+      });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to join queue' });
+    }
+  });
+
+  app.post('/api/admin/notify-taxpayer', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const { taxpayer_id } = req.body;
+
+    try {
+      const { rows } = await dbQuery('SELECT id, full_name, phone_number, queue_number, notified FROM users WHERE id = $1', [taxpayer_id]);
+      if (rows.length === 0) return res.status(404).json({ error: 'Taxpayer not found' });
+      
+      const tp = rows[0];
+      if (tp.notified) return res.json({ message: 'Already notified', success: true });
+      if (!tp.phone_number) return res.status(400).json({ error: 'No phone number linked' });
+
+      const formattedNum = `RPT-${String(tp.queue_number).padStart(4, '0')}`;
+      const callerFirstName = req.user.name.split(' ')[0];
+      await sendSMS(tp.phone_number, `Hello ${tp.full_name}! You are NEXT (Number: ${formattedNum}). Please proceed to ${callerFirstName} now. Thank you!`);
+      
+      const now = new Date().toISOString();
+      await dbQuery('UPDATE users SET notified = TRUE, notified_at = $1 WHERE id = $2', [now, taxpayer_id]);
+      res.json({ success: true, message: 'Notification sent', notified_at: now });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to notify' });
+    }
+  });
+
+  app.post('/api/admin/cancel-queue', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const { taxpayer_id } = req.body;
+
+    try {
+      await dbQuery(
+        'UPDATE users SET queue_number = NULL, queue_date = NULL, notified = FALSE, notified_at = NULL WHERE id = $1',
+        [taxpayer_id]
+      );
+      res.json({ success: true, message: 'Queue cancelled' });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to cancel queue' });
     }
   });
 
@@ -1529,17 +1709,15 @@ async function startServer() {
       // TAXPAYER LOGGING: Time Out (Commit)
       const taxpayer_id = property.owner_id;
       if (taxpayer_id) {
-        // Check for open log
+        // Check for open log for THIS collector
         const { rows: openLogs } = await dbQuery(
-          'SELECT id, pins FROM taxpayer_logs WHERE taxpayer_id = $1 AND time_out IS NULL ORDER BY created_at DESC LIMIT 1',
-          [taxpayer_id]
+          'SELECT id, pins FROM taxpayer_logs WHERE taxpayer_id = $1 AND user_id = $2 AND time_out IS NULL ORDER BY created_at DESC LIMIT 1',
+          [taxpayer_id, req.user.id]
         );
-
-        const properUsername = req.user.username.charAt(0).toUpperCase() + req.user.username.slice(1).toLowerCase();
 
         if (openLogs.length > 0) {
           // Close existing log
-          await dbQuery('UPDATE taxpayer_logs SET time_out = $1, user_name = $2 WHERE id = $3', [new Date().toISOString(), properUsername, openLogs[0].id]);
+          await dbQuery('UPDATE taxpayer_logs SET time_out = $1 WHERE id = $2', [new Date().toISOString(), openLogs[0].id]);
         } else {
           // If no open log, create one just to record the transaction (Time In = Time Out)
           const { rows: tpRows } = await dbQuery('SELECT full_name FROM users WHERE id = $1', [taxpayer_id]);
@@ -1549,7 +1727,7 @@ async function startServer() {
           await dbQuery(`
             INSERT INTO taxpayer_logs (taxpayer_id, taxpayer_name, role, user_id, user_name, pins, time_in, time_out, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-          `, [taxpayer_id, taxpayerName, req.user.role, req.user.id, properUsername, JSON.stringify(pins), new Date().toISOString(), new Date().toISOString(), new Date().toISOString()]);
+          `, [taxpayer_id, taxpayerName, req.user.role, req.user.id, req.user.name, JSON.stringify(pins), new Date().toISOString(), new Date().toISOString(), new Date().toISOString()]);
         }
       }
  
@@ -1593,9 +1771,7 @@ async function startServer() {
     
     try {
       let query = `
-        SELECT a.*, p.pin, p.registered_owner_name, p.lot_no, p.td_no, 
-          COALESCE((SELECT SUM(assessed_value) FROM properties p2 WHERE p2.pin = p.pin AND p2.registered_owner_name = p.registered_owner_name AND p2.property_status = 'active'), p.assessed_value) as property_assessed_value, 
-          p.address, p.description, p.total_area
+        SELECT a.*, p.pin, p.registered_owner_name, p.lot_no, p.td_no, p.assessed_value as property_assessed_value, p.address, p.description, p.total_area
         FROM assessments a
         JOIN properties p ON a.property_id = p.id
         WHERE (a.status = 'pending' OR a.status IS NULL)
@@ -1771,7 +1947,7 @@ async function startServer() {
   app.get('/api/taxpayer-logs', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'admin' && req.user.role !== 'collector') return res.status(403).json({ error: 'Forbidden' });
     try {
-      const { rows } = await dbQuery('SELECT * FROM taxpayer_logs ORDER BY created_at DESC LIMIT 100');
+      const { rows } = await dbQuery('SELECT * FROM taxpayer_logs ORDER BY created_at DESC LIMIT 200');
       res.json(rows);
     } catch (err) {
       console.error('Fetch taxpayer logs error:', err);
@@ -1781,32 +1957,17 @@ async function startServer() {
 
   app.post('/api/taxpayer-logs', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'collector' && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-    const { taxpayer_id, taxpayer_name, pins, time_in, time_out } = req.body;
+    const { taxpayer_id, taxpayer_name, pins, time_in, time_out, remarks } = req.body;
 
     try {
-      const properUsername = req.user.username.charAt(0).toUpperCase() + req.user.username.slice(1).toLowerCase();
-      const { rows } = await dbQuery(`
-        INSERT INTO taxpayer_logs (taxpayer_id, taxpayer_name, role, user_id, user_name, pins, time_in, time_out, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id
-      `, [taxpayer_id, taxpayer_name, req.user.role, req.user.id, properUsername, pins, time_in, time_out, new Date().toISOString()]);
-      res.json({ success: true, id: rows[0].id });
+      await dbQuery(`
+        INSERT INTO taxpayer_logs (taxpayer_id, taxpayer_name, role, user_id, user_name, pins, time_in, time_out, remarks, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `, [taxpayer_id, taxpayer_name, req.user.role, req.user.id, req.user.name, pins || '[]', time_in, time_out, remarks || '', new Date().toISOString()]);
+      res.json({ success: true });
     } catch (err) {
       console.error('Create taxpayer log error:', err);
       res.status(500).json({ error: 'Failed to create log' });
-    }
-  });
-
-  app.put('/api/taxpayer-logs/:id', authenticateToken, async (req: any, res) => {
-    if (req.user.role !== 'collector' && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-    const { time_out, pins } = req.body;
-
-    try {
-      await dbQuery('UPDATE taxpayer_logs SET time_out = $1, pins = $2 WHERE id = $3', [time_out, pins, req.params.id]);
-      res.json({ success: true });
-    } catch (err) {
-      console.error('Update taxpayer log error:', err);
-      res.status(500).json({ error: 'Failed to update log' });
     }
   });
 
@@ -1819,8 +1980,11 @@ async function startServer() {
           username, 
           full_name, 
           role, 
+          phone_number,
           last_active_at, 
-          queue_number
+          queue_number,
+          notified,
+          notified_at
         FROM users 
         WHERE last_active_at > $1
         ORDER BY last_active_at DESC
@@ -1833,10 +1997,26 @@ async function startServer() {
     }
   });
 
+  app.get('/api/queue/active', authenticateToken, async (req, res) => {
+    try {
+      const currentDay = new Date().toISOString().split('T')[0];
+      const { rows } = await dbQuery(`
+        SELECT id, username, full_name, role, phone_number, queue_number, notified, notified_at
+        FROM users 
+        WHERE queue_number IS NOT NULL AND queue_date = $1
+        ORDER BY queue_number ASC
+      `, [currentDay]);
+      res.json(rows);
+    } catch (err) {
+      console.error('Fetch active queue error:', err);
+      res.status(500).json({ error: 'Failed to fetch active queue' });
+    }
+  });
+
   // Barangay Endpoints
   app.get('/api/barangays', authenticateToken, async (req, res) => {
     try {
-      const { rows } = await dbQuery('SELECT * FROM barangays ORDER BY name ASC');
+      const { rows } = await dbQuery('SELECT * FROM barangays ORDER BY code ASC');
       res.json(rows);
     } catch (err) {
       console.error('Fetch barangays error:', err);
@@ -1878,8 +2058,27 @@ async function startServer() {
     }
 
     try {
-      const { type } = req.query; // '5year' or 'actual'
-      const { rows: properties } = await dbQuery('SELECT * FROM properties');
+      const { type, barangayCode } = req.query; // '5year' or 'actual'
+      
+      let propertiesQuery = 'SELECT * FROM properties';
+      const propertiesParams: any[] = [];
+      
+      console.log('[Delinquency] Request query:', req.query);
+      console.log('[Delinquency] barangayCode received:', JSON.stringify(barangayCode));
+      
+      if (barangayCode && barangayCode !== 'all') {
+        // Match the barangay code in the PIN's 3rd segment
+        // PIN might use dots (028.09.0001.xxx) or dashes (028-09-0001-xxx)
+        const codeStr = barangayCode as string;
+        propertiesQuery += ` WHERE (pin LIKE $1 OR pin LIKE $2)`;
+        propertiesParams.push(`%-%-${codeStr}-%`);  // dash format
+        propertiesParams.push(`%.%.${codeStr}.%`);  // dot format
+        console.log('[Delinquency] Filter patterns:', `%-%-${codeStr}-%`, `%.%.${codeStr}.%`);
+      }
+      
+      console.log('[Delinquency] Query:', propertiesQuery, 'Params:', propertiesParams);
+      const { rows: properties } = await dbQuery(propertiesQuery, propertiesParams);
+      console.log('[Delinquency] Properties found:', properties.length, properties.length > 0 ? 'Sample PIN: ' + properties[0]?.pin : '');
       const { rows: payments } = await dbQuery('SELECT property_id, year FROM payments');
 
       // Use the provided local time: 2026-03-15
@@ -2296,51 +2495,8 @@ async function startServer() {
     });
   }
 
-  // Setup SSL Certificate
-  let sslOptions: any = null;
-  const certPath = path.join(__dirname, 'server.crt');
-  const keyPath = path.join(__dirname, 'server.key');
-
-  if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
-    console.log('[Server] Using existing SSL certificate...');
-    sslOptions = {
-      key: fs.readFileSync(keyPath),
-      cert: fs.readFileSync(certPath)
-    };
-  } else {
-    console.log('[Server] Generating new self-signed certificate for secure access...');
-    const attrs: any[] = [{ name: 'commonName', value: 'localhost' }];
-    const pems = await generateSelfSigned(attrs, {
-      algorithm: 'sha256',
-      keySize: 2048,
-      extensions: [{
-        name: 'subjectAltName',
-        altNames: [
-          { type: 2, value: 'localhost' },
-          { type: 2, value: 'desktop-pjt812u.tailf1a711.ts.net.' },
-          { type: 7, ip: '127.0.0.1' },
-          { type: 7, ip: '100.84.4.41' },
-          { type: 7, ip: '100.65.168.30' }
-        ]
-      }]
-    });
-    
-    fs.writeFileSync(keyPath, pems.private);
-    fs.writeFileSync(certPath, pems.cert);
-    
-    sslOptions = {
-      key: pems.private,
-      cert: pems.cert
-    };
-    console.log('[Server] Certificate generated and saved to server.crt/server.key');
-  }
-
-  const server = https.createServer(sslOptions, app);
-
-  server.listen(PORT, HOST, () => {
-    console.log(`[Server] Securely Running on https://${HOST}:${PORT}`);
-    console.log(`[Server] Local Access: https://localhost:${PORT}`);
-    console.log(`[Server] Tailscale Access: https://100.84.4.41:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`[Server] Running on http://${HOST}:${PORT}`);
     console.log(`[DB] Using Host: ${poolConfig.host || 'localhost'}`);
     console.log(`[DB] Using Port: ${poolConfig.port || '5433'}`);
     console.log(`[DB] Using SSL: ${process.env.DB_SSL === 'true'}`);

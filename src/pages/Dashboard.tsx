@@ -384,7 +384,7 @@ export default function Dashboard({ taxpayerId, taxpayerName }: { taxpayerId?: n
                                       return new Date(dateStr).toLocaleDateString();
                                     })() : '-'}
                                   </td>
-                                  <td className="px-6 py-4 font-mono text-sm text-gray-600">{payment.or_no || '-'}</td>
+                                  <td className="px-6 py-4 font-mono text-xs text-gray-600">{payment.or_no || '-'}</td>
                                   <td className="px-6 py-4 text-gray-600">{payment.year || '-'}</td>
                                   <td className="px-6 py-4 text-right font-mono text-gray-700">
                                     <span className="inline-flex items-center justify-end w-full">

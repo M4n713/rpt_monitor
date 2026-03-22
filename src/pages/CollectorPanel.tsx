@@ -340,7 +340,7 @@ export default function CollectorPanel() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          currentPassword: passwordForm.currentPassword,
+          oldPassword: passwordForm.currentPassword,
           newPassword: passwordForm.newPassword
         })
       });
@@ -378,13 +378,7 @@ export default function CollectorPanel() {
   const [activeAbstractSearchQuery, setActiveAbstractSearchQuery] = useState('');
 
   const abstractSummary = useMemo(() => {
-    const now = new Date();
-    
-    // 1. Get MY payments (only those collected by the current user)
-    const myPayments = (collectorPayments || []).filter(p => p.collector_id === user?.id);
-    
-    // 2. Apply search filter only to MY payments for the table
-    const filtered = myPayments.filter(p =>
+    const filtered = collectorPayments.filter(p =>
       p.or_no?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
       p.year?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
       p.pin?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
@@ -392,25 +386,13 @@ export default function CollectorPanel() {
       p.registered_owner_name?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase())
     );
 
-    // 3. Today's payments for counts
-    const todayPayments = myPayments.filter(p => {
-      let dStr = p.payment_date;
-      if (typeof dStr === 'string' && !dStr.includes('Z') && !dStr.includes('+')) dStr = dStr.replace(' ', 'T') + 'Z';
-      const d = new Date(dStr || new Date());
-      return d.toDateString() === now.toDateString();
-    });
+    const uniqueTaxpayers = new Set(filtered.map(p => p.taxpayer_name).filter(Boolean)).size;
+    const uniquePins = new Set(filtered.map(p => p.pin).filter(Boolean)).size;
+    const totalAmount = filtered.reduce((sum, p) => sum + (p.amount || 0), 0);
+    const toDateAmount = collectorPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
 
-    const uniqueTaxpayersToday = new Set(todayPayments.map(p => p.taxpayer_name).filter(Boolean)).size;
-    const uniquePinsToday = new Set(todayPayments.map(p => p.pin).filter(Boolean)).size;
-    
-    // 4. Calculate "My Collection" (Today)
-    const myToday = todayPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
-
-    // 5. Calculate "My Collection" (To Date)
-    const myToDate = myPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
-
-    return { uniqueTaxpayers: uniqueTaxpayersToday, uniquePins: uniquePinsToday, myToday, myToDate, filtered };
-  }, [collectorPayments, activeAbstractSearchQuery, user?.id]);
+    return { uniqueTaxpayers, uniquePins, totalAmount, toDateAmount, filtered };
+  }, [collectorPayments, activeAbstractSearchQuery]);
 
   const [selectedLogPins, setSelectedLogPins] = useState<string[]>([]);
   const [selectedLogProperties, setSelectedLogProperties] = useState<Property[]>([]);
@@ -455,7 +437,7 @@ export default function CollectorPanel() {
   const fetchCollectorPayments = async () => {
     setIsAbstractLoading(true);
     try {
-      const res = await fetch('/api/admin/payments');
+      const res = await fetch('/api/collector/payments');
       if (res.ok) {
         const data = await res.json();
         setCollectorPayments(data);
@@ -740,8 +722,17 @@ export default function CollectorPanel() {
     fetchTaxpayerLogs();
   }, []);
 
-  // Reset dependent fields when taxpayer changes
   useEffect(() => {
+    if (selectedTaxpayerId) {
+      fetch('/api/collector/view-taxpayer', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ taxpayer_id: selectedTaxpayerId })
+      }).catch(err => console.error('Failed to log view-taxpayer', err));
+    }
+
     setSelectedPropertyId('');
     setPaymentQueue([]); // Clear queue on taxpayer change
     setPreviewItems([]); // Clear preview
@@ -1088,8 +1079,8 @@ export default function CollectorPanel() {
   const handlePayment = async () => {
     if (paymentQueue.length === 0 || !paymentForm.or_no) return;
 
-    if (paymentForm.or_no.length < 7) {
-      alert('OR Number must be between 7 and 10 digits.');
+    if (paymentForm.or_no.length < 8) {
+      alert('OR Number must be between 8 and 10 digits.');
       return;
     }
 
@@ -1210,8 +1201,8 @@ export default function CollectorPanel() {
   const handleOrInputChange = (id: string, value: string) => {
     // Only allow digits
     const digitsOnly = value.replace(/\D/g, '');
-    // Limit to max 10 digits
-    const limited = digitsOnly.slice(0, 10);
+    // Limit to max 9 digits
+    const limited = digitsOnly.slice(0, 9);
     setOrInputs(prev => ({ ...prev, [id]: limited }));
   };
 
@@ -1253,8 +1244,8 @@ export default function CollectorPanel() {
       alert('Please enter an OR Number.');
       return;
     }
-    if (orNo.length < 7) {
-      alert('OR Number must be between 7 and 10 digits.');
+    if (orNo.length < 8) {
+      alert('OR Number must be between 8 and 10 digits.');
       return;
     }
 
@@ -1276,6 +1267,28 @@ export default function CollectorPanel() {
         assessment_id: assessment.id,
         remarks: ''
       };
+
+      const received = window.confirm("Tax Payment Received?");
+      if (!received) {
+        // Log session closure as Cancelled
+        const tIn = taxpayerTimeIn[selectedTaxpayerId] || new Date().toISOString();
+        const tOut = new Date().toISOString();
+        fetch('/api/taxpayer-logs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            taxpayer_id: selectedTaxpayerId,
+            taxpayer_name: taxpayers.find(t => t.id.toString() === selectedTaxpayerId)?.full_name || 'Unknown',
+            pins: JSON.stringify([assessment.pin]),
+            time_in: tIn,
+            time_out: tOut,
+            remarks: 'Cancelled'
+          })
+        }).catch(console.error);
+        
+        alert('Payment session cancelled - Marked as Cancelled in logs');
+        return;
+      }
 
       const res = await fetch('/api/payment', {
         method: 'POST',
@@ -1435,8 +1448,8 @@ export default function CollectorPanel() {
                               </td>
                               <td className="px-4 py-4 text-sm font-sans align-bottom">
                                 <Input
-                                  placeholder="7-10 digits"
-                                  maxLength={10}
+                                  placeholder="7-9 digits"
+                                  maxLength={9}
                                   className="w-[110px] h-5 text-sm font-sans tracking-widest !px-0 !py-0 !p-0 !m-0 bg-transparent !border-0 !rounded-none focus:!outline-none focus:!ring-0 focus:!bg-transparent !text-left leading-none"
                                   value={orInputs[assessment.id] || ''}
                                   onChange={(e) => handleOrInputChange(assessment.id, e.target.value)}
@@ -1696,12 +1709,12 @@ export default function CollectorPanel() {
               <div className="flex-1 relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-400">OR#</span>
                 <Input
-                  placeholder="7-10 digits"
+                  placeholder="8-10 digits"
                   className="pl-10 h-10 border-gray-200 focus:ring-indigo-500"
                   value={paymentForm.or_no}
                   onChange={(e) => {
                     const digitsOnly = e.target.value.replace(/\D/g, '');
-                    setPaymentForm({ ...paymentForm, or_no: digitsOnly.slice(0, 10) });
+                    setPaymentForm({ ...paymentForm, or_no: digitsOnly.slice(0, 9) });
                   }}
                 />
               </div>
@@ -1955,33 +1968,18 @@ export default function CollectorPanel() {
     return (
       <div className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 no-print">
-          <Card className="border-none shadow-sm bg-indigo-600 text-white">
+          <Card className="border-none shadow-sm bg-blue-600 text-white">
             <CardContent className="pt-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-indigo-100 text-sm font-medium">Total Collection as of</p>
-                  <h3 className="text-2xl font-bold mt-1">₱ {parseFloat(String(abstractSummary.myToday || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</h3>
+                  <p className="text-blue-100 text-sm font-medium">Total Collected</p>
+                  <h3 className="text-2xl font-bold mt-1">₱ {parseFloat(String(abstractSummary.totalAmount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</h3>
                 </div>
                 <div className="p-3 bg-white/10 rounded-xl">
                   <CreditCard className="w-6 h-6 text-white" />
                 </div>
               </div>
-              <p className="text-xs text-indigo-200 mt-4 italic font-medium">{new Date().toLocaleDateString()}</p>
-            </CardContent>
-          </Card>
-
-          <Card className="border-none shadow-sm bg-blue-600 text-white">
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-blue-100 text-sm font-medium">No. of PINs</p>
-                  <h3 className="text-2xl font-bold mt-1">{abstractSummary.uniquePins}</h3>
-                </div>
-                <div className="p-3 bg-white/10 rounded-xl">
-                  <Globe className="w-6 h-6 text-white" />
-                </div>
-              </div>
-              <p className="text-xs text-blue-200 mt-4 italic font-medium">Processed today</p>
+              <p className="text-xs text-blue-200 mt-4">For current search/filter</p>
             </CardContent>
           </Card>
 
@@ -1996,7 +1994,22 @@ export default function CollectorPanel() {
                   <Users className="w-6 h-6 text-gray-400" />
                 </div>
               </div>
-              <p className="text-xs text-gray-400 mt-4 italic font-medium">Transacted today</p>
+              <p className="text-xs text-gray-400 mt-4">Unique taxpayers in list</p>
+            </CardContent>
+          </Card>
+
+          <Card className="border-none shadow-sm bg-white">
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-gray-500 text-sm font-medium">No. of PINs</p>
+                  <h3 className="text-2xl font-bold mt-1 text-gray-900">{abstractSummary.uniquePins}</h3>
+                </div>
+                <div className="p-3 bg-gray-50 rounded-xl">
+                  <Home className="w-6 h-6 text-gray-400" />
+                </div>
+              </div>
+              <p className="text-xs text-gray-400 mt-4">Unique properties in list</p>
             </CardContent>
           </Card>
 
@@ -2006,14 +2019,14 @@ export default function CollectorPanel() {
                 <div>
                   <p className="text-gray-500 text-sm font-medium">To Date</p>
                   <h3 className="text-2xl font-bold mt-1 text-gray-900">
-                    ₱ {parseFloat(String(abstractSummary.myToDate || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    ₱ {parseFloat(String(abstractSummary.toDateAmount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                   </h3>
                 </div>
                 <div className="p-3 bg-gray-50 rounded-xl">
                   <History className="w-6 h-6 text-gray-400" />
                 </div>
               </div>
-              <p className="text-xs text-gray-400 mt-4">Cumulative total</p>
+              <p className="text-xs text-gray-400 mt-4">Cumulative historical amount</p>
             </CardContent>
           </Card>
         </div>
@@ -2180,9 +2193,7 @@ export default function CollectorPanel() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
-                {rptarSearchResults
-                  .filter(prop => rptarSelectedPropertyId ? prop.id === rptarSelectedPropertyId : true)
-                  .map((prop) => (
+                {rptarSearchResults.map((prop) => (
                   <tr
                     key={prop.id}
                     className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
@@ -2447,6 +2458,7 @@ export default function CollectorPanel() {
           </form>
         </CardContent>
       </Card>
+      
       <MessagingPanel />
     </div>
   );

@@ -110,15 +110,23 @@ export default function Login() {
           </form>
         </CardContent>
         <CardFooter className="flex justify-center">
-          <p className="text-sm text-gray-500">
-            Don't have an account?{' '}
-            <button 
-              onClick={() => setShowInquiryModal(true)}
-              className="text-blue-500 hover:underline font-medium focus:outline-none"
+          <div className="flex flex-col items-center space-y-2">
+            <p className="text-sm text-gray-500">
+              Don't have an account?{' '}
+              <button 
+                onClick={() => setShowInquiryModal(true)}
+                className="text-blue-500 hover:underline font-medium focus:outline-none"
+              >
+                Inquire with us
+              </button>
+            </p>
+            <Link 
+              to="/queue" 
+              className="text-xs font-bold text-slate-400 hover:text-blue-600 transition-colors uppercase tracking-widest mt-2"
             >
-              Inquire with us
-            </button>
-          </p>
+              Public Queue Kiosk
+            </Link>
+          </div>
         </CardFooter>
       </Card>
 
