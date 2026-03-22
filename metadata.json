@@ -1,0 +1,5 @@
+{
+  "name": "RPT Monitoring App",
+  "description": "A monitoring app for real property tax management with roles for Taxpayers, Collectors, and Admins.",
+  "requestFramePermissions": []
+}
