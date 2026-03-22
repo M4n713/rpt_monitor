@@ -97,6 +97,9 @@ interface Property {
   claimed_area?: string;
   owners?: { id: number; full_name: string; ownership_type?: string; claimed_area?: string }[];
   remarks?: string;
+  status?: string;
+  taxability?: string;
+  classification?: string;
 }
 
 interface Payment {
@@ -667,7 +670,7 @@ export default function AdminPanel() {
 
 
   const menuItems = [
-    { id: 'tagging', label: 'Assessment Roll', subtitle: 'Search and Link Properties', icon: Tag },
+    { id: 'tagging', label: 'ASSESSMENT ROLL', subtitle: 'Search and Link Properties', icon: Tag },
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'payment-queue', label: 'Payment Queue', subtitle: 'Manage Payments and Assessments', icon: CreditCard }] : []),
     { id: 'computation', label: 'RPT Computation', subtitle: 'Calculate Tax Due', icon: Calculator },
     { id: 'rptar', label: 'RPTAR', subtitle: 'RPT Account Register', icon: User },
@@ -757,6 +760,17 @@ export default function AdminPanel() {
         throw new TypeError("Oops, we haven't got JSON!");
       }
       const data = await res.json();
+      if (data.length > 0) {
+        const first = data[0];
+        console.log('[DEBUG-RPTAR] Item Sample:', {
+          registered_owner: first.registered_owner_name,
+          status: first.status,
+          taxability: first.taxability,
+          classification: first.classification,
+          remarks: first.remarks,
+          raw_data: first
+        });
+      }
       setRptarSearchResults(data);
     } catch (err) {
       console.error(err);
@@ -1596,6 +1610,17 @@ export default function AdminPanel() {
         throw new TypeError("Oops, we haven't got JSON!");
       }
       const data = await res.json();
+      if (data.length > 0) {
+        const first = data[0];
+        console.log('[DEBUG] Search Result Item Sample:', {
+          registered_owner: first.registered_owner_name,
+          status: first.status,
+          taxability: first.taxability,
+          classification: first.classification,
+          remarks: first.remarks,
+          raw_data: first
+        });
+      }
       setSearchResults(data);
       return data;
     } catch (err) {
@@ -1961,7 +1986,7 @@ export default function AdminPanel() {
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   <Input
                     placeholder="Search by PIN, Registered Owner or TD No."
-                    className="pl-10 h-12 rounded-xl border-gray-200"
+                    className="pl-10 h-12 rounded-none border-gray-200"
                     value={searchQuery}
                     onChange={(e) => syncGlobalSearch(e.target.value)}
                     onKeyDown={(e) => {
@@ -1973,7 +1998,7 @@ export default function AdminPanel() {
                 </div>
                 <Button
                   onClick={() => syncGlobalSearch(searchQuery, true)}
-                  className="h-12 px-6 rounded-xl bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold"
+                  className="h-12 px-6 rounded-none bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold"
                 >
                   Search
                 </Button>
@@ -2002,7 +2027,7 @@ export default function AdminPanel() {
                   }).catch(console.error);
                 }}
               >
-                <SelectTrigger className="w-full h-10 rounded-xl border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20">
+                <SelectTrigger className="w-full h-12 rounded-none border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
                   <SelectValue placeholder="Choose a taxpayer..." />
                 </SelectTrigger>
                 <SelectContent className="max-h-[300px]">
@@ -2052,7 +2077,7 @@ export default function AdminPanel() {
                     return (
                       <div
                         key={prop.id}
-                        className={`p-4 border transition-all rounded-xl cursor-pointer hover:shadow-md ${isSelected
+                        className={`p-4 border transition-all rounded-none cursor-pointer hover:shadow-md ${isSelected
                           ? 'border-blue-500 bg-blue-50/50 ring-1 ring-blue-500'
                           : 'border-gray-100 bg-white'
                           }`}
@@ -2066,28 +2091,45 @@ export default function AdminPanel() {
                             </div>
                             <div>
                               {/* 1. Wrapped the name and badges in a flex container */}
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <h3 className="font-bold text-gray-900">{prop.registered_owner_name}</h3>
+                                <div className="flex items-center gap-2 flex-wrap mt-0.5">
+                                  <h3 className="font-bold text-gray-900 text-sm">{prop.registered_owner_name}</h3>
 
-                                {/* 2. Status Badge (Green for Active, Red for Delinquent) */}
-                                {prop.status && (
-                                  <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${prop.status.toLowerCase() === 'active'
-                                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                                      : prop.status.toLowerCase() === 'delinquent'
-                                        ? 'bg-red-50 text-red-700 border-red-200'
-                                        : 'bg-gray-50 text-gray-700 border-gray-200'
-                                    }`}>
-                                    {prop.status}
-                                  </span>
-                                )}
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {/* Status Badge */}
+                                    {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
+                                      <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${
+                                          (prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
+                                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                          : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
+                                            ? 'bg-red-50 text-red-700 border-red-200'
+                                            : 'bg-blue-50 text-blue-700 border-blue-200'
+                                        }`}>
+                                        {prop.status}
+                                      </span>
+                                    )}
 
-                                {/* 3. Classification Badge (Blue) */}
-                                {prop.classification && (
-                                  <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                                    {prop.classification}
-                                  </span>
-                                )}
-                              </div>
+                                    {/* Taxability Badge */}
+                                    {prop.taxability && (
+                                      <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                        {prop.taxability}
+                                      </span>
+                                    )}
+
+                                    {/* Classification Badge */}
+                                    {prop.classification && (
+                                      <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+                                        {prop.classification}
+                                      </span>
+                                    )}
+
+                                    {/* Remarks Badge */}
+                                    {prop.remarks && (
+                                      <span className="px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
+                                        {prop.remarks}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
 
                               <div className="flex flex-wrap gap-2 mt-1">
                                 <p className="text-[10px] font-mono text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
@@ -2118,11 +2160,6 @@ export default function AdminPanel() {
                                   <X className="w-3 h-3" />
                                 </button>
                               </div>
-                              {prop.remarks && (
-                                <span className="text-[10px] text-orange-600 font-semibold bg-orange-50 px-2 py-0.5 rounded border border-orange-100">
-                                  {prop.remarks}
-                                </span>
-                              )}
                             </div>
                           )}
                         </div>
@@ -2166,7 +2203,7 @@ export default function AdminPanel() {
                                       }))}
                                       disabled={p.owners && p.owners.length > 0}
                                     >
-                                      <SelectTrigger className="h-6 rounded-md border-gray-200 bg-white px-2 text-[10px] font-bold text-gray-600 shadow-none hover:border-blue-300 transition-colors focus:ring-0">
+                                      <SelectTrigger className="h-12 rounded-none border-gray-200 bg-white px-2 text-[10px] font-bold text-gray-600 shadow-none hover:border-blue-300 transition-colors focus:ring-0">
                                         <SelectValue placeholder="Type" />
                                       </SelectTrigger>
                                       <SelectContent>
@@ -2181,7 +2218,7 @@ export default function AdminPanel() {
                                       <div className="animate-in fade-in slide-in-from-right-1">
                                         <Input
                                           placeholder="Sqm"
-                                          className="h-6 rounded-md text-[10px] font-mono border-gray-200 px-2 focus:ring-0 shadow-none"
+                                          className="h-12 rounded-none text-[10px] font-mono border-gray-200 px-2 focus:ring-0 shadow-none"
                                           value={propertyDetails[p.id]?.claimed_area || ''}
                                           onChange={(e) => setPropertyDetails(prev => ({
                                             ...prev,
@@ -2192,7 +2229,7 @@ export default function AdminPanel() {
                                         />
                                       </div>
                                     ) : (
-                                      <div className="h-6" /> // Placeholder for alignment
+                                      <div className="h-12" /> // Placeholder for alignment
                                     )}
                                   </div>
                                 </div>
@@ -2207,7 +2244,7 @@ export default function AdminPanel() {
                             value={tagForm.assigned_collector_id}
                             onValueChange={(v) => setTagForm(prev => ({ ...prev, assigned_collector_id: v }))}
                           >
-                            <SelectTrigger className="w-full h-10 rounded-xl border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20">
+                            <SelectTrigger className="w-full h-12 rounded-none border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
                               <SelectValue placeholder="Unassigned" />
                             </SelectTrigger>
                             <SelectContent>
@@ -2227,7 +2264,7 @@ export default function AdminPanel() {
                         <div className="flex gap-2 mt-4">
                           <Button
                             type="submit"
-                            className={`flex-1 h-12 rounded-xl shadow-lg transition-all font-semibold ${submitStatus !== 'idle' ? 'bg-green-600 hover:bg-green-700 shadow-green-200' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-200'
+                            className={`flex-1 h-12 rounded-none transition-all font-semibold ${submitStatus !== 'idle' ? 'bg-green-600 hover:bg-green-700 shadow-none' : 'bg-blue-600 hover:bg-blue-700 shadow-none'
                               }`}
                             disabled={submitStatus !== 'idle'}
                           >
@@ -2289,7 +2326,7 @@ export default function AdminPanel() {
                   }).catch(console.error);
                 }}
               >
-                <SelectTrigger className="w-full h-12 rounded-xl border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20">
+                <SelectTrigger className="w-full h-12 rounded-none border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
                   <SelectValue placeholder="Select Taxpayer..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -2320,7 +2357,7 @@ export default function AdminPanel() {
                 onValueChange={setSelectedComputationPropertyId}
                 disabled={!selectedTaxpayerId}
               >
-                <SelectTrigger className="w-full h-12 rounded-xl border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20 disabled:bg-gray-50 disabled:cursor-not-allowed">
+                <SelectTrigger className="w-full h-12 rounded-none border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20 disabled:bg-gray-50 disabled:cursor-not-allowed">
                   <SelectValue placeholder="Select PIN" />
                 </SelectTrigger>
                 <SelectContent>
@@ -2375,7 +2412,7 @@ export default function AdminPanel() {
                       value={paymentForm.computationType}
                       onValueChange={v => setPaymentForm({ ...paymentForm, computationType: v })}
                     >
-                      <SelectTrigger className="w-full h-12 rounded-xl border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-sm hover:border-blue-400 focus:ring-blue-500/20">
+                      <SelectTrigger className="w-full h-12 rounded-none border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
                         <SelectValue placeholder="Select Type..." />
                       </SelectTrigger>
                       <SelectContent>
@@ -3157,7 +3194,7 @@ export default function AdminPanel() {
                   <p className="text-gray-500 max-w-sm mx-auto">Launch the kiosk mode in a new browser window for taxpayers to register and join the queue.</p>
                 </div>
                 <Button
-                  onClick={() => window.open('/queue', '_blank')}
+                  onClick={() => window.open('/queue', 'QueueKioskWindow', 'width=1024,height=768,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes')}
                   className="bg-blue-600 hover:bg-blue-700 shadow-lg px-8 h-12 text-lg font-bold"
                 >
                   Launch Kiosk Mode
@@ -3179,12 +3216,12 @@ export default function AdminPanel() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <Input
                 placeholder="Search by PIN, Registered Owner, or Taxpayer..."
-                className="pl-9 h-12 rounded-md border-gray-200"
+                className="pl-9 h-12 rounded-none border-gray-200"
                 value={rptarSearchQuery}
                 onChange={(e) => syncGlobalSearch(e.target.value)}
               />
             </div>
-            <Button type="submit" disabled={isRptarSearching} className="h-12 px-6 rounded-md bg-blue-600 hover:bg-blue-700">
+            <Button type="submit" disabled={isRptarSearching} className="h-12 px-6 rounded-none bg-blue-600 hover:bg-blue-700">
               {isRptarSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Search'}
             </Button>
           </form>
@@ -3216,7 +3253,43 @@ export default function AdminPanel() {
                     key={prop.id}
                     className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                   >
-                    <td className="px-6 py-4 text-gray-900 font-medium text-sm whitespace-normal break-words leading-tight">{prop.registered_owner_name}</td>
+                    <td className="px-6 py-4 text-gray-900 font-medium text-sm whitespace-normal break-words leading-tight">
+                      <div className="flex flex-col gap-1">
+                        <span>{prop.registered_owner_name}</span>
+                        <div className="mt-2 text-xs text-gray-600 line-clamp-2 italic">
+                          {prop.description}
+                        </div>
+                        <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap mt-1">
+                          {/* Status Badge */}
+                          {prop.status && prop.status.toLowerCase() !== 'unpaid' && (
+                            <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${
+                                (prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
+                                  ? 'bg-red-50 text-red-700 border-red-200'
+                                  : 'bg-blue-50 text-blue-700 border-blue-200'
+                              }`}>
+                              {prop.status}
+                            </span>
+                          )}
+                          {prop.taxability && (
+                            <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                              {prop.taxability}
+                            </span>
+                          )}
+                          {prop.classification && (
+                            <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+                              {prop.classification}
+                            </span>
+                          )}
+                          {prop.remarks && (
+                            <span className="px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
+                              {prop.remarks}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </td>
                     <td className="px-6 py-4 text-gray-600 text-sm whitespace-normal break-words leading-tight">
                       {prop.linked_taxpayer ? (
                         <div className="flex flex-col gap-1 items-start">
@@ -3230,11 +3303,6 @@ export default function AdminPanel() {
                               <X className="w-3 h-3" />
                             </button>
                           </span>
-                          {prop.remarks && (
-                            <span className="text-[10px] text-orange-600 font-semibold bg-orange-50 px-2 py-0.5 rounded border border-orange-100">
-                              {prop.remarks}
-                            </span>
-                          )}
                         </div>
                       ) : (
                         <span className="text-gray-400 text-xs italic">Not Tagged</span>
@@ -3651,7 +3719,7 @@ export default function AdminPanel() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <Input
                 placeholder="Search OR No, PIN, or Taxpayer..."
-                className="pl-9 h-10 w-full rounded-md border-gray-200 bg-white"
+                className="pl-9 h-12 w-full rounded-none border-gray-200 bg-white"
                 value={abstractSearchQuery}
                 onChange={(e) => syncGlobalSearch(e.target.value)}
                 onKeyDown={(e) => {
@@ -3661,7 +3729,7 @@ export default function AdminPanel() {
                 }}
               />
             </div>
-            <Button variant="outline" onClick={() => window.print()} className="ml-4 gap-2">
+            <Button variant="outline" onClick={() => window.print()} className="ml-4 gap-2 h-12 rounded-none">
               <Printer className="w-4 h-4" />
               Print Abstract
             </Button>

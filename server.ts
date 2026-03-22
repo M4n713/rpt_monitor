@@ -401,11 +401,14 @@ const initDb = async (retries = 1, delay = 1000) => {
           description TEXT,
           assessed_value NUMERIC NOT NULL,
           tax_due NUMERIC NOT NULL,
-          status TEXT NOT NULL CHECK(status IN ('unpaid', 'paid', 'partial')),
+          status TEXT,
           last_payment_date TIMESTAMPTZ,
           total_area TEXT,
           ownership_type TEXT CHECK(ownership_type IN ('full', 'shared')),
-          claimed_area TEXT
+          claimed_area TEXT,
+          taxability TEXT,
+          classification TEXT,
+          remarks TEXT
         );
 
         CREATE TABLE IF NOT EXISTS property_owners (
@@ -532,6 +535,12 @@ const initDb = async (retries = 1, delay = 1000) => {
             EXCEPTION WHEN OTHERS THEN 
               -- Might already be updated or not supported
             END;
+            ALTER TABLE properties ADD COLUMN IF NOT EXISTS taxability TEXT;
+            ALTER TABLE properties ADD COLUMN IF NOT EXISTS classification TEXT;
+            ALTER TABLE properties ADD COLUMN IF NOT EXISTS remarks TEXT;
+            BEGIN
+              ALTER TABLE properties DROP CONSTRAINT IF EXISTS properties_status_check;
+            EXCEPTION WHEN OTHERS THEN END;
         EXCEPTION WHEN OTHERS THEN 
             -- Tables might not exist yet or columns already have types, ignore errors in script
         END $$;
@@ -557,6 +566,12 @@ const initDb = async (retries = 1, delay = 1000) => {
       await dbQuery(`
         ALTER TABLE payments ALTER COLUMN collector_id DROP NOT NULL;
       `).catch(e => console.log('Alter table collector_id failed:', e.message));
+
+      // Robust Property Migrations
+      await dbQuery('ALTER TABLE properties ADD COLUMN IF NOT EXISTS taxability TEXT').catch(() => {});
+      await dbQuery('ALTER TABLE properties ADD COLUMN IF NOT EXISTS classification TEXT').catch(() => {});
+      await dbQuery('ALTER TABLE properties ADD COLUMN IF NOT EXISTS remarks TEXT').catch(() => {});
+      await dbQuery('ALTER TABLE properties DROP CONSTRAINT IF EXISTS properties_status_check').catch(() => {});
 
       // Seed Barangays
       const { rows: bRows } = await dbQuery('SELECT COUNT(*) FROM barangays');
@@ -1015,7 +1030,7 @@ async function startServer() {
       }
 
       // Enrich properties with owner info
-      const enrichedProperties = await Promise.all(properties.map(async p => {
+      const enrichedProperties = await Promise.all(properties.map(async (p, index) => {
         const { rows: owners } = await dbQuery(`
           SELECT u.id, u.full_name, po.ownership_type, po.claimed_area 
           FROM property_owners po
@@ -1023,20 +1038,34 @@ async function startServer() {
           WHERE po.property_id = $1
         `, [p.id]);
 
+        // STRIKE TEAM: Forcefully wipe 'unpaid' from the result
+        const finalStatus = (p.status && p.status.toLowerCase().includes('unpaid')) ? null : p.status;
+
         const ownerNames = owners.map((o: any) => o.full_name).join(', ');
         const remarks = owners.length > 1 ? 'with 2 or more claimants' : '';
         
         // For backward compatibility or primary display
         const primaryOwner = owners[0];
 
+        if (index === 0) {
+          console.log('[DEBUG] Sending Property to Frontend:', { 
+            pin: p.pin, 
+            status: p.status, 
+            taxability: p.taxability, 
+            classification: p.classification, 
+            remarks: p.remarks
+          });
+        }
+
         return {
           ...p,
+          status: finalStatus,
           owners,
           linked_taxpayer: ownerNames || null,
-          owner_id: primaryOwner?.id || null, // Primary owner ID for simple filters
+          owner_id: primaryOwner?.id || null, 
           ownership_type: primaryOwner?.ownership_type,
           claimed_area: primaryOwner?.claimed_area,
-          remarks: remarks // Add remarks field
+          remarks: p.remarks || (owners.length > 1 ? 'with 2 or more claimants' : '')
         };
       }));
 
@@ -1345,66 +1374,127 @@ async function startServer() {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     const results: any[] = [];
+    // First, detect potential separator in first line
+    const firstLine = req.file.buffer.toString().split('\n')[0];
+    let separator = ',';
+    if (firstLine.includes(';')) separator = ';';
+    else if (firstLine.includes('\t')) separator = '\t';
+    
+    console.log('[DEBUG] Auto-detected CSV separator:', { separator });
+
     const stream = Readable.from(req.file.buffer.toString());
 
     stream
-      .pipe(csvParser({
-        mapHeaders: ({ header }) => header.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
-      }))
+      .pipe(csvParser({ separator }))
       .on('data', (data) => results.push(data))
       .on('end', async () => {
-        console.log('CSV Parsing complete. Rows found:', results.length);
+        if (results.length > 0) {
+          console.log('[DEBUG] First Row Data Sample:', results[0]);
+        }
+
         try {
+          // NUCLEAR OPTION: Drop and Re-format the entire property database
+          await dbQuery(`
+            DROP TABLE IF EXISTS assessments CASCADE;
+            DROP TABLE IF EXISTS payments CASCADE;
+            DROP TABLE IF EXISTS property_owners CASCADE;
+            DROP TABLE IF EXISTS properties CASCADE;
+
+            CREATE TABLE properties (
+              id SERIAL PRIMARY KEY,
+              registered_owner_name TEXT,
+              pin TEXT,
+              td_no TEXT,
+              lot_no TEXT,
+              address TEXT,
+              description TEXT,
+              assessed_value NUMERIC,
+              tax_due NUMERIC,
+              status TEXT,
+              total_area TEXT,
+              taxability TEXT,
+              classification TEXT,
+              remarks TEXT
+            );
+
+            CREATE TABLE property_owners (
+              id SERIAL PRIMARY KEY,
+              property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+              user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+              ownership_type TEXT,
+              claimed_area TEXT
+            );
+
+            CREATE TABLE payments (
+              id SERIAL PRIMARY KEY,
+              property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+              amount NUMERIC,
+              payment_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+              collector_id INTEGER REFERENCES users(id),
+              taxpayer_id INTEGER REFERENCES users(id),
+              or_no TEXT,
+              year TEXT
+            );
+
+            CREATE TABLE assessments (
+              id SERIAL PRIMARY KEY,
+              property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+              user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+              amount NUMERIC,
+              year TEXT,
+              status TEXT DEFAULT 'pending'
+            );
+          `);
+          
           await dbQuery('BEGIN');
           
           let successCount = 0;
           let errorCount = 0;
           const errors: string[] = [];
-          
-          // DELETE ALL DATA
-          await dbQuery('DELETE FROM assessments');
-          await dbQuery('DELETE FROM payments');
-          await dbQuery('DELETE FROM property_owners');
-          await dbQuery('DELETE FROM properties');
 
-          // Insert New Properties
           for (const row of results) {
-            // Skip completely empty rows
-            if (!row.registeredowner && !row.pin && !row.tdno) {
-              continue;
-            }
+            // High-Resilience Key Matcher
+            const grab = (searchTerm: string) => {
+              const cleaned = searchTerm.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+              const key = Object.keys(row).find(k => k.toLowerCase().trim().replace(/[^a-z0-9]/g, '') === cleaned);
+              return key ? String(row[key] || '').trim() : null;
+            };
 
-            const registeredOwner = row.registeredowner || null;
-            const pin = row.pin || row.propertyindexnumber || null;
-            const tdNo = row.tdno || null;
-            const lotNo = row.lotblockno || row.lotno || null;
-            const description = [row.kind, row.classification, row.remarks].filter(Boolean).join(' - ') || null;
+            const registeredOwner = grab('registeredowner') || grab('registered_owner') || grab('owner') || null;
+            const pin = grab('pin') || null;
+            const tdNo = grab('tdno') || grab('td_no') || null;
+            const lotNo = grab('lotblockno') || grab('lot_no') || null;
+            const kind = grab('kind') || grab('description') || null;
+            const rawStatus = grab('status');
+            const status = (rawStatus && rawStatus.toLowerCase() !== 'unpaid' && rawStatus !== '-') ? rawStatus : null;
+            const taxability = grab('taxability');
+            const classification = grab('classification');
+            const remarks = grab('remarks');
             
             let assessedVal = 0;
             try {
-              let valStr = String(row.assessedvalue || '0').replace(/,/g, '').trim();
-              valStr = valStr.replace(/[^\d.-]/g, '');
-              if (valStr === '' || valStr === '-') valStr = '0';
-              assessedVal = parseFloat(valStr);
-              if (isNaN(assessedVal)) assessedVal = 0;
-            } catch (e) {
-              assessedVal = 0;
-            }
+              assessedVal = parseFloat(String(grab('assessedvalue') || '0').replace(/,/g, ''));
+            } catch (e) { assessedVal = 0; }
 
-            const taxDue = assessedVal * 0.02;
+            const taxDue = (assessedVal || 0) * 0.02;
 
-            if (!registeredOwner) {
-              continue;
-            }
+            if (!registeredOwner) continue;
 
             try {
-              // Insert new record
               await dbQuery(`
-                INSERT INTO properties (registered_owner_name, pin, td_no, lot_no, address, description, assessed_value, tax_due, status, total_area) 
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-              `, [registeredOwner, pin, tdNo, lotNo, null, description, assessedVal, taxDue, 'unpaid', row.area || null]);
+                INSERT INTO properties (
+                  registered_owner_name, pin, td_no, lot_no, address, 
+                  description, assessed_value, tax_due, status, total_area,
+                  taxability, classification, remarks
+                ) 
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+              `, [
+                registeredOwner, pin, tdNo, lotNo, null, 
+                kind, assessedVal, taxDue, status, row.area || null,
+                taxability, classification, remarks
+              ]);
               successCount++;
-            } catch (e: any) {
+            } catch (e) {
               errorCount++;
               errors.push(`Failed to insert row. Owner: ${registeredOwner}, PIN: ${pin}. Error: ${e.message}`);
             }

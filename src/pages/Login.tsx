@@ -120,12 +120,16 @@ export default function Login() {
                 Inquire with us
               </button>
             </p>
-            <Link 
-              to="/queue" 
+            <a 
+              href="/queue"
+              onClick={(e) => {
+                e.preventDefault();
+                window.open('/queue', 'QueueKioskWindow', 'width=1024,height=768,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes');
+              }}
               className="text-xs font-bold text-slate-400 hover:text-blue-600 transition-colors uppercase tracking-widest mt-2"
             >
               Public Queue Kiosk
-            </Link>
+            </a>
           </div>
         </CardFooter>
       </Card>

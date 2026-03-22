@@ -1351,7 +1351,7 @@ export default function CollectorPanel() {
                     }
                   }}
                 >
-                  <SelectTrigger className="w-full h-12 text-base bg-white border-gray-200 shadow-sm hover:border-blue-300 transition-all duration-200 rounded-md pl-10">
+                  <SelectTrigger className="w-full h-12 text-base bg-white border-gray-200 shadow-none hover:border-blue-300 transition-all duration-200 rounded-none pl-10">
                     <SelectValue placeholder="Search or select a taxpayer..." />
                   </SelectTrigger>
                   <SelectContent className="max-h-[300px]">
@@ -1378,7 +1378,7 @@ export default function CollectorPanel() {
             </div>
             <div className="flex flex-col items-center justify-center space-y-1">
               <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider text-center">Current Queue</span>
-              <div className="bg-indigo-50 text-indigo-700 font-mono text-2xl font-bold px-6 py-2 rounded-xl border border-indigo-100 shadow-sm text-center min-w-[120px] h-12 flex items-center justify-center">
+              <div className="bg-indigo-50 text-indigo-700 font-mono text-2xl font-bold px-6 py-2 rounded-none border border-indigo-100 shadow-none text-center min-w-[120px] h-12 flex items-center justify-center">
                 {queueNumber}
               </div>
             </div>
@@ -1710,7 +1710,7 @@ export default function CollectorPanel() {
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-400">OR#</span>
                 <Input
                   placeholder="8-10 digits"
-                  className="pl-10 h-10 border-gray-200 focus:ring-indigo-500"
+                  className="pl-10 h-12 rounded-none border-gray-200 focus:ring-indigo-500"
                   value={paymentForm.or_no}
                   onChange={(e) => {
                     const digitsOnly = e.target.value.replace(/\D/g, '');
@@ -1718,7 +1718,7 @@ export default function CollectorPanel() {
                   }}
                 />
               </div>
-              <Button onClick={handlePayment} className="h-10 px-8 bg-indigo-600 hover:bg-indigo-700">
+              <Button onClick={handlePayment} className="h-12 rounded-none px-8 bg-indigo-600 hover:bg-indigo-700">
                 Process Batch Payment
               </Button>
             </div>
@@ -1767,7 +1767,7 @@ export default function CollectorPanel() {
                     value={paymentForm.computationType}
                     onValueChange={v => setPaymentForm({ ...paymentForm, computationType: v })}
                   >
-                    <SelectTrigger className="w-full h-10 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <SelectTrigger className="w-full h-12 rounded-none border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                       <SelectValue placeholder="Select Type..." />
                     </SelectTrigger>
                     <SelectContent>
@@ -1790,7 +1790,7 @@ export default function CollectorPanel() {
                       value={paymentForm.year}
                       onChange={e => setPaymentForm({ ...paymentForm, year: e.target.value })}
                       required
-                      className="flex-1"
+                      className="h-12 rounded-none flex-1"
                     />
                     <Button
                       type="button"
