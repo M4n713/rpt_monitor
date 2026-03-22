@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../components/ui/context/AuthContext';
+// No AuthContext needed for public kiosk
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/src/components/ui/card';
 import { Button } from '@/src/components/ui/button';
 import { Input } from '@/src/components/ui/input';
@@ -23,11 +23,7 @@ import {
 } from 'lucide-react';
 
 export default function QueueSystem() {
-  const { user, login, logout } = useAuth();
   const navigate = useNavigate();
-  const [step, setStep] = useState<'login' | 'form'>('login');
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   
   const [formData, setFormData] = useState({
@@ -42,44 +38,6 @@ export default function QueueSystem() {
   const [queueInfo, setQueueInfo] = useState<{ label: string, fullName: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [successAnimation, setSuccessAnimation] = useState(false);
-
-  useEffect(() => {
-    if (user) {
-      if (user.role === 'queue' || user.role === 'admin' || user.role === 'collector') {
-        setStep('form');
-      } else {
-        logout();
-        setStep('login');
-      }
-    } else {
-      setStep('login');
-    }
-  }, [user]);
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-    try {
-      const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      
-      if (res.ok) {
-        const userData = await res.json();
-        login(userData);
-      } else {
-        const data = await res.json();
-        setError(data.error || 'Invalid credentials');
-      }
-    } catch (err) {
-      setError('Connection failed');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleMIChange = (val: string) => {
     let cleaned = val.replace(/[^a-zA-Z]/g, '').toUpperCase();
@@ -124,52 +82,6 @@ export default function QueueSystem() {
     }
   };
 
-  if (step === 'login') {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <Card className="w-full max-w-sm bg-white shadow-xl border-none overflow-hidden rounded-2xl">
-          <div className="h-1.5 bg-blue-600"></div>
-          <CardHeader className="text-center pt-8 pb-4">
-            <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
-              <ShieldCheck className="w-8 h-8" />
-            </div>
-            <CardTitle className="text-xl font-bold text-slate-900 uppercase tracking-tight">Kiosk Login</CardTitle>
-            <CardDescription className="text-slate-500 text-xs font-medium uppercase tracking-widest">Authorized Access Only</CardDescription>
-          </CardHeader>
-          <CardContent className="px-6 pb-8">
-            <form onSubmit={handleLogin} className="space-y-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="username" className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Username</Label>
-                <Input 
-                  id="username" 
-                  placeholder="Kiosk username" 
-                  value={username}
-                  onChange={e => setUsername(e.target.value)}
-                  className="h-11 border-slate-200 focus:ring-blue-500"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="password" title="Treas123" className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Password</Label>
-                <Input 
-                  id="password" 
-                  type="password" 
-                  placeholder="••••••••" 
-                  value={password}
-                  onChange={e => setPassword(e.target.value)}
-                  className="h-11 border-slate-200 focus:ring-blue-500"
-                />
-              </div>
-              {error && <p className="text-red-500 text-[11px] font-bold text-center bg-red-50 py-2 rounded-lg">{error}</p>}
-              <Button type="submit" className="w-full h-11 text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white transition-all shadow-md mt-2" disabled={loading}>
-                {loading ? 'AUTHENTICATING...' : 'ACCESS SYSTEM'}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
   return (
     <div className="h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden flex flex-col">
       {/* Compact Header */}
@@ -189,7 +101,7 @@ export default function QueueSystem() {
             <div className="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
             <span className="text-[9px] font-bold text-green-600 uppercase tracking-wider">Online</span>
           </div>
-          <button onClick={logout} className="flex items-center gap-1.5 text-slate-400 hover:text-red-500 font-bold text-[10px] uppercase tracking-wider transition-all">
+          <button onClick={() => navigate('/')} className="flex items-center gap-1.5 text-slate-400 hover:text-red-500 font-bold text-[10px] uppercase tracking-wider transition-all">
             <LogOut className="w-3.5 h-3.5" /> Close
           </button>
         </div>
