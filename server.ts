@@ -398,9 +398,9 @@ const initDb = async (retries = 1, delay = 1000) => {
           td_no TEXT,
           lot_no TEXT,
           address TEXT,
-          description TEXT,
+          kind TEXT,
           assessed_value NUMERIC NOT NULL,
-          tax_due NUMERIC NOT NULL,
+          tax_due NUMERIC DEFAULT 0,
           status TEXT,
           last_payment_date TIMESTAMPTZ,
           total_area TEXT,
@@ -408,8 +408,22 @@ const initDb = async (retries = 1, delay = 1000) => {
           claimed_area TEXT,
           taxability TEXT,
           classification TEXT,
+          old_pin TEXT,
+          effectivity TEXT,
           remarks TEXT
         );
+
+        -- Add columns if they missed the boat during initial creation
+        ALTER TABLE properties ADD COLUMN IF NOT EXISTS kind TEXT;
+        ALTER TABLE properties ADD COLUMN IF NOT EXISTS old_pin TEXT;
+        ALTER TABLE properties ADD COLUMN IF NOT EXISTS effectivity TEXT;
+        ALTER TABLE properties ADD COLUMN IF NOT EXISTS td_no TEXT;
+        ALTER TABLE properties ADD COLUMN IF NOT EXISTS lot_no TEXT;
+        ALTER TABLE properties ALTER COLUMN tax_due SET DEFAULT 0;
+        ALTER TABLE properties ALTER COLUMN assessed_value DROP NOT NULL;
+        ALTER TABLE properties ALTER COLUMN assessed_value SET DEFAULT 0;
+        ALTER TABLE properties ALTER COLUMN tax_due DROP NOT NULL;
+
 
         CREATE TABLE IF NOT EXISTS property_owners (
           id SERIAL PRIMARY KEY,
@@ -1126,6 +1140,19 @@ async function startServer() {
     }
   });
 
+  app.put('/api/admin/payments/:id/date', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const { id } = req.params;
+    const { payment_date } = req.body;
+    try {
+      await dbQuery('UPDATE payments SET payment_date = $1 WHERE id = $2', [payment_date, id]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to update payment date' });
+    }
+  });
+
   app.post('/api/admin/link-property', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden: Admin access required' });
     const { properties, taxpayer_id, assigned_collector_id } = req.body;
@@ -1451,50 +1478,63 @@ async function startServer() {
           let successCount = 0;
           let errorCount = 0;
           const errors: string[] = [];
-
-          for (const row of results) {
-            // High-Resilience Key Matcher
+          for (const [index, row] of results.entries()) {
             const grab = (searchTerm: string) => {
               const cleaned = searchTerm.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
               const key = Object.keys(row).find(k => k.toLowerCase().trim().replace(/[^a-z0-9]/g, '') === cleaned);
               return key ? String(row[key] || '').trim() : null;
             };
 
+            // STRIKE FORCE: ROBUST HEADER CAPTURE
             const registeredOwner = grab('registeredowner') || grab('registered_owner') || grab('owner') || null;
             const pin = grab('pin') || null;
             const tdNo = grab('tdno') || grab('td_no') || null;
-            const lotNo = grab('lotblockno') || grab('lot_no') || null;
-            const kind = grab('kind') || grab('description') || null;
-            const rawStatus = grab('status');
-            const status = (rawStatus && rawStatus.toLowerCase() !== 'unpaid' && rawStatus !== '-') ? rawStatus : null;
-            const taxability = grab('taxability');
-            const classification = grab('classification');
-            const remarks = grab('remarks');
-            
-            let assessedVal = 0;
+            const lotNo = grab('lotblockno') || grab('lot_no') || grab('lot') || grab('block') || null;
+            const kind = grab('kind') || grab('description') || grab('propkind') || grab('propertykind') || grab('landkind') || null;
+            const classification = grab('classification') || grab('class') || grab('propclass') || null;
+            const assessedVal = parseFloat(String(grab('assessedvalue') || grab('assessed_value') || grab('av') || '0').replace(/,/g, ''));
+            const oldPin = grab('oldpin') || grab('old_pin') || grab('old_pin_no') || null;
+            const area = grab('area') || grab('total_area') || grab('sqm') || null;
+            const status = grab('status') || grab('propstatus') || null;
+            const taxability = grab('taxability') || grab('taxable') || grab('tax_status') || null;
+            const effectivity = grab('effectivity') || grab('effective') || null;
+            const remarks = grab('remarks') || grab('comment') || null;
+
+            if (index === 0) {
+              console.log('[DEBUG-ROLL] One Row Mapping:', { pin, status, taxability, classification });
+            }
+
+            if (!registeredOwner && !pin) continue;
+
             try {
-              assessedVal = parseFloat(String(grab('assessedvalue') || '0').replace(/,/g, ''));
-            } catch (e) { assessedVal = 0; }
-
-            const taxDue = (assessedVal || 0) * 0.02;
-
-            if (!registeredOwner) continue;
-
-            try {
+              // Database insert - using UPSERT logic (replace if PIN exists)
               await dbQuery(`
                 INSERT INTO properties (
-                  registered_owner_name, pin, td_no, lot_no, address, 
-                  description, assessed_value, tax_due, status, total_area,
-                  taxability, classification, remarks
+                  pin, td_no, registered_owner_name, lot_no, total_area, 
+                  assessed_value, kind, classification, old_pin, status, 
+                  taxability, effectivity, remarks
                 ) 
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                ON CONFLICT (pin) DO UPDATE SET
+                  td_no = EXCLUDED.td_no,
+                  registered_owner_name = EXCLUDED.registered_owner_name,
+                  lot_no = EXCLUDED.lot_no,
+                  total_area = EXCLUDED.total_area,
+                  assessed_value = EXCLUDED.assessed_value,
+                  kind = EXCLUDED.kind,
+                  classification = EXCLUDED.classification,
+                  old_pin = EXCLUDED.old_pin,
+                  status = EXCLUDED.status,
+                  taxability = EXCLUDED.taxability,
+                  effectivity = EXCLUDED.effectivity,
+                  remarks = EXCLUDED.remarks
               `, [
-                registeredOwner, pin, tdNo, lotNo, null, 
-                kind, assessedVal, taxDue, status, row.area || null,
-                taxability, classification, remarks
+                pin, tdNo, registeredOwner, lotNo, area,
+                assessedVal, kind, classification, oldPin, status || '',
+                taxability || '', effectivity, remarks
               ]);
               successCount++;
-            } catch (e) {
+            } catch (e: any) {
               errorCount++;
               errors.push(`Failed to insert row. Owner: ${registeredOwner}, PIN: ${pin}. Error: ${e.message}`);
             }

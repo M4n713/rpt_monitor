@@ -49,6 +49,7 @@ import {
   FileText,
   Activity,
   AlertTriangle,
+  ArrowLeft,
   Printer,
   Mail,
   Shield,
@@ -456,16 +457,24 @@ export default function AdminPanel() {
   const [extractedPdfData, setExtractedPdfData] = useState<Array<{ startYear: number; endYear: number; assessed_value: number }> | null>(null);
   const [abstractSearchQuery, setAbstractSearchQuery] = useState('');
   const [activeAbstractSearchQuery, setActiveAbstractSearchQuery] = useState('');
+  const [abstractCollectorFilter, setAbstractCollectorFilter] = useState('all');
+  const [abstractDateFilter, setAbstractDateFilter] = useState('');
 
   const abstractSummary = useMemo(() => {
-    const filtered = allPayments.filter(p =>
-      p.or_no?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
-      p.year?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
-      p.pin?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
-      p.collector_name?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
-      p.taxpayer_name?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
-      p.registered_owner_name?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase())
-    );
+    const filtered = allPayments.filter(p => {
+      const matchSearch = activeAbstractSearchQuery === '' ||
+        p.or_no?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
+        p.year?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
+        p.pin?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
+        p.collector_name?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
+        p.taxpayer_name?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase()) ||
+        p.registered_owner_name?.toLowerCase().includes(activeAbstractSearchQuery.toLowerCase());
+
+      const matchCollector = abstractCollectorFilter === 'all' || p.collector_name === abstractCollectorFilter;
+      const matchDate = abstractDateFilter === '' || new Date(p.payment_date).toISOString().split('T')[0] === abstractDateFilter;
+
+      return matchSearch && matchCollector && matchDate;
+    });
 
     const uniqueTaxpayers = new Set(filtered.map(p => p.taxpayer_name).filter(Boolean)).size;
     const uniquePins = new Set(filtered.map(p => p.pin).filter(Boolean)).size;
@@ -670,7 +679,7 @@ export default function AdminPanel() {
 
 
   const menuItems = [
-    { id: 'tagging', label: 'ASSESSMENT ROLL', subtitle: 'Search and Link Properties', icon: Tag },
+    { id: 'tagging', label: 'Assessment Roll', subtitle: 'Search and Link Properties', icon: Tag },
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'payment-queue', label: 'Payment Queue', subtitle: 'Manage Payments and Assessments', icon: CreditCard }] : []),
     { id: 'computation', label: 'RPT Computation', subtitle: 'Calculate Tax Due', icon: Calculator },
     { id: 'rptar', label: 'RPTAR', subtitle: 'RPT Account Register', icon: User },
@@ -682,7 +691,7 @@ export default function AdminPanel() {
     { id: 'active-users', label: 'Active Users', subtitle: 'Currently Online Users', icon: Users },
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'delinquency-report', label: 'Delinquency Report', subtitle: 'View Delinquent Accounts', icon: AlertTriangle }] : []),
     { id: 'settings', label: 'Settings', subtitle: 'Manage System Settings', icon: Settings },
-    { id: 'queue-management', label: 'Live Queue', icon: ClockIcon, subtitle: 'Real-time service queue tracker' }
+    { id: 'queue-management', label: 'Active Queue', icon: ClockIcon, subtitle: 'Real-time service queue tracker' }
   ];
 
   const settingsItems = [
@@ -964,6 +973,27 @@ export default function AdminPanel() {
       }
     } catch (err) {
       console.error('Create taxpayer error', err);
+    }
+  };
+
+  const handleUpdatePaymentDate = async (paymentId: number, newDate: string) => {
+    if (!newDate) return;
+    try {
+      const res = await fetch(`/api/admin/payments/${paymentId}/date`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payment_date: newDate }),
+      });
+
+      if (res.ok) {
+        // Update local state
+        setAllPayments(prev => prev.map(p => p.id === paymentId ? { ...p, payment_date: newDate } : p));
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Failed to update payment date');
+      }
+    } catch (err) {
+      console.error('Update payment date error', err);
     }
   };
 
@@ -1978,15 +2008,15 @@ export default function AdminPanel() {
     <div className="space-y-8">
       <Card className="border-none shadow-sm">
         <CardContent className="pt-6">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mb-8">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mb-4">
             <div className="lg:col-span-8">
-              <Label className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-2 block">Search Property</Label>
+              <Label className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-1 block">Search Property</Label>
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   <Input
-                    placeholder="Search by PIN, Registered Owner or TD No."
-                    className="pl-10 h-12 rounded-none border-gray-200"
+                    placeholder="Search PIN, Owner or TD No."
+                    className="pl-10 h-9 rounded-none border-gray-200 text-xs"
                     value={searchQuery}
                     onChange={(e) => syncGlobalSearch(e.target.value)}
                     onKeyDown={(e) => {
@@ -1998,15 +2028,15 @@ export default function AdminPanel() {
                 </div>
                 <Button
                   onClick={() => syncGlobalSearch(searchQuery, true)}
-                  className="h-12 px-6 rounded-none bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold"
+                  className="h-9 px-6 rounded-none bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold text-xs"
                 >
                   Search
                 </Button>
               </div>
             </div>
 
-            <div className="lg:col-span-4 pl-6">
-              <Label className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-2 block">Select Taxpayer Account</Label>
+            <div className="lg:col-span-4 pl-6 border-l border-gray-100">
+              <Label className="text-[11px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-1 block">Select Taxpayer Account</Label>
               <Select
                 value={tagForm.taxpayer_id}
                 onValueChange={(v) => {
@@ -2027,22 +2057,22 @@ export default function AdminPanel() {
                   }).catch(console.error);
                 }}
               >
-                <SelectTrigger className="w-full h-12 rounded-none border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
+                <SelectTrigger className="w-full h-9 rounded-none border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
                   <SelectValue placeholder="Choose a taxpayer..." />
                 </SelectTrigger>
                 <SelectContent className="max-h-[300px]">
                   {users.filter(u => u.role === 'taxpayer').length === 0 && (
-                    <div className="p-4 text-center text-sm text-gray-500">
+                    <div className="p-4 text-center text-xs text-gray-500">
                       No taxpayers found.
                     </div>
                   )}
                   {users.filter(u => u.role === 'taxpayer')
                     .sort((a, b) => (a.queue_number || 0) - (b.queue_number || 0))
                     .map((u) => (
-                      <SelectItem key={u.id} value={u.id.toString()}>
+                      <SelectItem key={u.id} value={u.id.toString()} className="text-xs font-semibold">
                         <div className="flex items-center gap-2">
-                          <User className="w-4 h-4 text-gray-400" />
-                          <span>
+                          <User className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                          <span className="truncate">
                             {u.queue_number ? `[RPT-${String(u.queue_number).padStart(3, '0')}] ` : ''}
                             {u.full_name}
                           </span>
@@ -2065,7 +2095,7 @@ export default function AdminPanel() {
                   <span className="text-xs text-gray-400">{searchResults.length} {searchResults.length === 1 ? 'Property' : 'Properties'} Found</span>
                 </div>
 
-                <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar">
+                <div className="space-y-1 max-h-[700px] overflow-y-auto pr-2 custom-scrollbar">
                   {searchResults.length === 0 && (
                     <div className="text-center py-20 border-2 border-dashed rounded-xl border-gray-100">
                       <Search className="w-10 h-10 text-gray-200 mx-auto mb-3" />
@@ -2077,7 +2107,7 @@ export default function AdminPanel() {
                     return (
                       <div
                         key={prop.id}
-                        className={`p-4 border transition-all rounded-none cursor-pointer hover:shadow-md ${isSelected
+                        className={`p-2 border transition-all rounded-none cursor-pointer hover:shadow-md ${isSelected
                           ? 'border-blue-500 bg-blue-50/50 ring-1 ring-blue-500'
                           : 'border-gray-100 bg-white'
                           }`}
@@ -2091,13 +2121,13 @@ export default function AdminPanel() {
                             </div>
                             <div>
                               {/* 1. Wrapped the name and badges in a flex container */}
-                                <div className="flex items-center gap-2 flex-wrap mt-0.5">
-                                  <h3 className="font-bold text-gray-900 text-sm">{prop.registered_owner_name}</h3>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <h3 className="font-bold text-gray-900 text-xs">{prop.registered_owner_name}</h3>
 
-                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                  <div className="flex items-center gap-1 flex-wrap">
                                     {/* Status Badge */}
                                     {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
-                                      <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${
+                                      <span className={`px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full border ${
                                           (prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
                                           ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                           : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
@@ -2110,38 +2140,44 @@ export default function AdminPanel() {
 
                                     {/* Taxability Badge */}
                                     {prop.taxability && (
-                                      <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                      <span className="px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
                                         {prop.taxability}
                                       </span>
                                     )}
 
                                     {/* Classification Badge */}
                                     {prop.classification && (
-                                      <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+                                      <span className="px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
                                         {prop.classification}
                                       </span>
                                     )}
 
                                     {/* Remarks Badge */}
                                     {prop.remarks && (
-                                      <span className="px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
+                                      <span className="px-1.5 py-0 text-[9px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
                                         {prop.remarks}
                                       </span>
                                     )}
                                   </div>
                                 </div>
 
-                              <div className="flex flex-wrap gap-2 mt-1">
-                                <p className="text-[10px] font-mono text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
+                              <div className="flex flex-wrap gap-2 mt-0.5">
+                                <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded">
                                   PIN: {prop.pin}
                                 </p>
-                                <p className="text-[10px] font-mono text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
+                                <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded">
+                                  Old PIN: {prop.old_pin || '-'}
+                                </p>
+                                <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded">
                                   TD No: {prop.td_no}
                                 </p>
-                                <p className="text-[10px] font-mono text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
+                                <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded">
+                                  Kind: {prop.kind}
+                                </p>
+                                <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded">
                                   Lot No: {prop.lot_no}
                                 </p>
-                                <p className="text-[10px] font-mono text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
+                                <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded border border-gray-100 italic">
                                   Area: {prop.total_area}
                                 </p>
                               </div>
@@ -2178,23 +2214,23 @@ export default function AdminPanel() {
                     </h2>
                     {selectedProperties.length > 0 ? (
                       <form onSubmit={handleTagSubmit} className="space-y-5">
-                        <div className="space-y-0">
-                          <div className="max-h-[600px] overflow-y-auto custom-scrollbar pr-2 border-t border-gray-50 pt-1">
+                        <div className="space-y-1">
+                          <div className="max-h-[600px] overflow-y-auto custom-scrollbar pr-2 border-t border-gray-50 pt-2">
                             {selectedProperties.map(p => (
-                              <div key={p.id} className="py-1 flex items-center justify-start gap-2 border-b border-gray-50/80 last:border-0 hover:bg-gray-50/30 transition-colors px-1">
-                                <div className="flex items-center gap-2 w-[185px] shrink-0">
-                                  <span className="text-[11px] font-mono font-bold text-gray-600 truncate">{p.pin}</span>
+                              <div key={p.id} className="py-0 flex items-center justify-start gap-2 last:border-0 hover:bg-gray-50/30 transition-colors px-1 border border-transparent hover:border-gray-100 rounded">
+                                <div className="flex items-center gap-1.5 w-[185px] min-w-0 shrink-0">
+                                  <span className="text-xs font-mono font-bold text-blue-700 truncate tracking-tighter">{p.pin}</span>
                                   <button
                                     type="button"
                                     onClick={(e) => { e.stopPropagation(); togglePropertySelection(p); }}
-                                    className="text-gray-300 hover:text-red-500 transition-colors text-sm"
+                                    className="text-gray-300 hover:text-red-500 transition-colors text-xs"
                                   >
                                     &times;
                                   </button>
                                 </div>
 
                                 <div className="flex items-center gap-2 shrink-0">
-                                  <div className="w-[85px]">
+                                  <div className="w-[110px]">
                                     <Select
                                       value={propertyDetails[p.id]?.ownership_type || 'full'}
                                       onValueChange={v => setPropertyDetails(prev => ({
@@ -2203,12 +2239,12 @@ export default function AdminPanel() {
                                       }))}
                                       disabled={p.owners && p.owners.length > 0}
                                     >
-                                      <SelectTrigger className="h-12 rounded-none border-gray-200 bg-white px-2 text-[10px] font-bold text-gray-600 shadow-none hover:border-blue-300 transition-colors focus:ring-0">
+                                      <SelectTrigger className="h-8 rounded-none border-gray-200 bg-white px-2 text-xs font-bold text-gray-600 shadow-none hover:border-blue-300 transition-colors focus:ring-0">
                                         <SelectValue placeholder="Type" />
                                       </SelectTrigger>
                                       <SelectContent>
-                                        <SelectItem value="full" className="text-[10px]">Full Area</SelectItem>
-                                        <SelectItem value="shared" className="text-[10px]">Share Area</SelectItem>
+                                        <SelectItem value="full" className="text-xs">Full Area</SelectItem>
+                                        <SelectItem value="shared" className="text-xs">Share Area</SelectItem>
                                       </SelectContent>
                                     </Select>
                                   </div>
@@ -2218,7 +2254,7 @@ export default function AdminPanel() {
                                       <div className="animate-in fade-in slide-in-from-right-1">
                                         <Input
                                           placeholder="Sqm"
-                                          className="h-12 rounded-none text-[10px] font-mono border-gray-200 px-2 focus:ring-0 shadow-none"
+                                          className="h-8 rounded-none text-xs font-mono border-gray-200 px-2 focus:ring-0 shadow-none"
                                           value={propertyDetails[p.id]?.claimed_area || ''}
                                           onChange={(e) => setPropertyDetails(prev => ({
                                             ...prev,
@@ -2229,7 +2265,7 @@ export default function AdminPanel() {
                                         />
                                       </div>
                                     ) : (
-                                      <div className="h-12" /> // Placeholder for alignment
+                                      <div className="h-8" /> // Placeholder for alignment
                                     )}
                                   </div>
                                 </div>
@@ -2244,16 +2280,16 @@ export default function AdminPanel() {
                             value={tagForm.assigned_collector_id}
                             onValueChange={(v) => setTagForm(prev => ({ ...prev, assigned_collector_id: v }))}
                           >
-                            <SelectTrigger className="w-full h-12 rounded-none border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
-                              <SelectValue placeholder="Unassigned" />
+                            <SelectTrigger className="w-full h-9 rounded-none border-gray-200 bg-white px-4 text-xs font-semibold text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
+                              <SelectValue placeholder="Choose a Collector" />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="unassigned">Unassigned</SelectItem>
+                              <SelectItem value="unassigned" className="text-xs font-semibold">Unassigned</SelectItem>
                               {collectors.map((c) => (
-                                <SelectItem key={c.id} value={c.id.toString()}>
+                                <SelectItem key={c.id} value={c.id.toString()} className="text-xs font-semibold">
                                   <span className="flex items-center gap-2">
-                                    <User className="w-4 h-4 text-gray-400" />
-                                    <span>{c.full_name}</span>
+                                    <User className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                                    <span className="truncate">{c.full_name}</span>
                                   </span>
                                 </SelectItem>
                               ))}
@@ -2734,11 +2770,12 @@ export default function AdminPanel() {
               <Input
                 id="erptaas-pin"
                 placeholder="028-09-XXXX-XXX-XX"
+                className="h-9 rounded-none border-gray-200 text-xs font-mono"
                 value={erptaasPin}
                 onChange={(e) => syncGlobalSearch(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && syncGlobalSearch(erptaasPin, true)}
               />
-              <Button onClick={handleSearch} className="bg-blue-600 hover:bg-blue-700">
+              <Button onClick={handleSearch} className="h-9 px-6 rounded-none bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold text-xs whitespace-nowrap">
                 Search
               </Button>
             </div>
@@ -3215,14 +3252,14 @@ export default function AdminPanel() {
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <Input
-                placeholder="Search by PIN, Registered Owner, or Taxpayer..."
-                className="pl-9 h-12 rounded-none border-gray-200"
+                placeholder="Search PIN, Owner, or Taxpayer..."
+                className="pl-9 h-9 rounded-none border-gray-200 text-xs"
                 value={rptarSearchQuery}
                 onChange={(e) => syncGlobalSearch(e.target.value)}
               />
             </div>
-            <Button type="submit" disabled={isRptarSearching} className="h-12 px-6 rounded-none bg-blue-600 hover:bg-blue-700">
-              {isRptarSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Search'}
+            <Button type="submit" disabled={isRptarSearching} className="h-9 px-6 rounded-none bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold text-xs transition-all">
+              {isRptarSearching ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Search'}
             </Button>
           </form>
         </CardContent>
@@ -3237,9 +3274,11 @@ export default function AdminPanel() {
             <table className="w-full text-sm text-left">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Kind</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider">Registered Owner</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider">Taxpayer</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">PIN</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Old PIN</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">TD No.</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Lot No.</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right whitespace-nowrap">Area</th>
@@ -3248,20 +3287,22 @@ export default function AdminPanel() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
-                {rptarSearchResults.map((prop) => (
+                {rptarSearchResults
+                  .filter(p => !rptarSelectedPropertyId || p.id === rptarSelectedPropertyId)
+                  .map((prop) => (
                   <tr
                     key={prop.id}
                     className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                   >
+                    <td className="px-6 py-4 text-[11px] font-bold text-gray-600 uppercase tracking-tighter whitespace-nowrap">
+                      {prop.kind || prop.description || '-'}
+                    </td>
                     <td className="px-6 py-4 text-gray-900 font-medium text-sm whitespace-normal break-words leading-tight">
                       <div className="flex flex-col gap-1">
                         <span>{prop.registered_owner_name}</span>
-                        <div className="mt-2 text-xs text-gray-600 line-clamp-2 italic">
-                          {prop.description}
-                        </div>
                         <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap mt-1">
                           {/* Status Badge */}
-                          {prop.status && prop.status.toLowerCase() !== 'unpaid' && (
+                          {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
                             <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${
                                 (prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
                                 ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
@@ -3309,6 +3350,7 @@ export default function AdminPanel() {
                       )}
                     </td>
                     <td className="px-6 py-4 font-mono text-sm text-gray-600 whitespace-nowrap">{prop.pin}</td>
+                    <td className="px-6 py-4 font-mono text-sm text-gray-400 whitespace-nowrap">{prop.old_pin || '-'}</td>
                     <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.td_no}</td>
                     <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.lot_no}</td>
                     <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">{prop.total_area || '-'}</td>
@@ -3714,24 +3756,56 @@ export default function AdminPanel() {
 
       <Card className="border-none shadow-sm">
         <CardContent className="p-0">
-          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/30 flex justify-between items-center no-print">
-            <div className="relative max-w-md flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/10 flex flex-wrap gap-4 items-end no-print">
+            <div className="space-y-1">
+              <Label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Collector</Label>
+              <Select value={abstractCollectorFilter} onValueChange={setAbstractCollectorFilter}>
+                <SelectTrigger className="h-9 w-[120px] rounded-none border-gray-200 bg-white text-xs font-semibold">
+                  <SelectValue placeholder="All" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all" className="text-xs">All</SelectItem>
+                  {collectors.map(c => (
+                    <SelectItem key={c.id} value={c.full_name} className="text-xs">{c.full_name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <Label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Payment Date</Label>
               <Input
-                placeholder="Search OR No, PIN, or Taxpayer..."
-                className="pl-9 h-12 w-full rounded-none border-gray-200 bg-white"
-                value={abstractSearchQuery}
-                onChange={(e) => syncGlobalSearch(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    syncGlobalSearch(abstractSearchQuery, true);
-                  }
-                }}
+                type="date"
+                className="h-9 rounded-none border-gray-200 bg-white text-xs font-semibold w-[140px]"
+                value={abstractDateFilter}
+                onChange={(e) => setAbstractDateFilter(e.target.value)}
               />
             </div>
-            <Button variant="outline" onClick={() => window.print()} className="ml-4 gap-2 h-12 rounded-none">
-              <Printer className="w-4 h-4" />
-              Print Abstract
+
+            <div className="flex-1 min-w-[300px] space-y-1">
+              <Label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Search</Label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                  <Input
+                    placeholder="Search OR No, PIN, or Taxpayer..."
+                    className="pl-9 h-9 w-full rounded-none border-gray-200 bg-white text-xs"
+                    value={abstractSearchQuery}
+                    onChange={(e) => setAbstractSearchQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && setActiveAbstractSearchQuery(abstractSearchQuery)}
+                  />
+                </div>
+                <Button
+                  onClick={() => setActiveAbstractSearchQuery(abstractSearchQuery)}
+                  className="h-9 px-6 rounded-none bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold text-xs whitespace-nowrap"
+                >
+                  Search
+                </Button>
+              </div>
+            </div>
+
+            <Button variant="outline" onClick={() => window.print()} className="h-9 w-9 p-0 rounded-none border-gray-200 bg-white hover:bg-gray-50 flex items-center justify-center">
+              <Printer className="w-4 h-4 text-gray-600" />
             </Button>
           </div>
           <div className="overflow-x-auto print-area">
@@ -3763,7 +3837,14 @@ export default function AdminPanel() {
                 ) : (
                   abstractSummary.filtered.map(payment => (
                     <TableRow key={payment.id} className="hover:bg-gray-50/50 transition-colors">
-                      <TableCell className="text-sm whitespace-nowrap">{new Date(payment.payment_date).toLocaleDateString()}</TableCell>
+                      <TableCell className="text-sm whitespace-nowrap py-1">
+                        <Input
+                          type="date"
+                          className="h-7 w-fit border-transparent bg-transparent hover:border-gray-200 focus:bg-white text-[11px] font-semibold px-1 py-0 shadow-none ring-0 focus-visible:ring-0 rounded-none transition-all"
+                          value={new Date(payment.payment_date).toISOString().split('T')[0]}
+                          onChange={(e) => handleUpdatePaymentDate(payment.id, e.target.value)}
+                        />
+                      </TableCell>
                       <TableCell className="text-sm font-medium text-gray-900 whitespace-normal break-words leading-tight">{payment.registered_owner_name || '-'}</TableCell>
                       <TableCell className="text-sm text-gray-600 whitespace-normal break-words leading-tight">{payment.taxpayer_name || '-'}</TableCell>
                       <TableCell className="font-mono text-sm text-gray-500 whitespace-nowrap">{payment.pin || '-'}</TableCell>
