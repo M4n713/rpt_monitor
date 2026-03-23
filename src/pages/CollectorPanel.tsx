@@ -1062,12 +1062,30 @@ export default function CollectorPanel() {
 
   // Removed handleQueueItemChange since queue is now read-only (or removed via button)
 
-  const removeFromQueue = (index: number) => {
+  const removeFromQueue = async (index: number) => {
     const newQueue = [...paymentQueue];
     newQueue.splice(index, 1);
     setPaymentQueue(newQueue);
-    // Refresh assessments to show it back in the suggested computations table
-    fetchAssessments();
+
+    // Refresh assessments, but keep assessments already moved to `paymentQueue` hidden.
+    // `/api/assessments` returns the server-side pending list and does NOT know about
+    // the client-side `paymentQueue`, so a plain refetch would cause other items to re-appear.
+    try {
+      const res = await fetch('/api/assessments');
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new TypeError("Oops, we haven't got JSON!");
+      }
+      const data = await res.json();
+
+      const queuedAssessmentIds = new Set(newQueue.map(q => q.assessment_id));
+      setPendingAssessments(data.filter((a: any) => !queuedAssessmentIds.has(a.id)));
+    } catch (err) {
+      console.error('Failed to refresh assessments after queue removal', err);
+      // Fallback: at least show UI update (queue item already removed).
+      fetchAssessments();
+    }
   };
 
   const removeFromPreview = (index: number) => {
@@ -1214,7 +1232,22 @@ export default function CollectorPanel() {
       });
       if (res.ok) {
         console.log('[DEBUG] Assessment removed successfully:', assessmentId);
-        fetchAssessments();
+
+        // Keep assessments already moved into `paymentQueue` hidden.
+        try {
+          const pendingRes = await fetch('/api/assessments');
+          if (!pendingRes.ok) throw new Error(`HTTP error! status: ${pendingRes.status}`);
+          const contentType = pendingRes.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            throw new TypeError("Oops, we haven't got JSON!");
+          }
+          const data = await pendingRes.json();
+          const queuedAssessmentIds = new Set(paymentQueue.map(q => q.assessment_id));
+          setPendingAssessments(data.filter((a: any) => !queuedAssessmentIds.has(a.id)));
+        } catch (e) {
+          // Fallback: at least refresh the UI.
+          fetchAssessments();
+        }
       } else {
         const text = await res.text();
         let errorData: any = {};
@@ -1390,7 +1423,7 @@ export default function CollectorPanel() {
               {taxpayerAssessments.length > 0 ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <h3 className="font-semibold text-indigo-950 text-xl">Suggested Computations</h3>
+                    <h3 className="text-lg font-medium text-gray-900">Suggested Computation</h3>
                     <div className="flex items-center gap-2">
                       <Button variant="ghost" size="sm" onClick={() => { fetchAssessments(); fetchUsers(); }} title="Refresh Assessments">
                         <Activity className="h-4 w-4 mr-1" />
@@ -1408,13 +1441,13 @@ export default function CollectorPanel() {
                         <tr className="align-middle">
                           <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">PIN</th>
                           <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">Registered Owner</th>
-                          <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">Location</th>
-                          <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">Lot No</th>
-                          <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">TD No</th>
-                          <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">Area</th>
-                          <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-middle">Assessed<br />Value</th>
-                          <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-center align-middle">Tax Due</th>
-                          <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-left align-middle">OR Number</th>
+                          <th className="px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">Location</th>
+                          <th className="px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">Lot No</th>
+                          <th className="px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">TD No</th>
+                          <th className="px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-middle">Area</th>
+                          <th className="px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-middle">Assessed Value</th>
+                          <th className="px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-center align-middle">Tax Due</th>
+                          <th className="px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-left align-middle">OR Number</th>
                           <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-center align-middle">Action</th>
                         </tr>
                       </thead>
@@ -1427,18 +1460,18 @@ export default function CollectorPanel() {
                             <tr className="hover:bg-gray-50/50 transition-colors">
                               <td className="px-4 py-4 text-sm font-sans font-medium text-gray-700 align-bottom whitespace-nowrap">{assessment.pin}</td>
                               <td className="px-4 py-4 text-sm font-sans text-gray-600 break-words whitespace-normal uppercase align-bottom max-w-[150px]">{assessment.registered_owner_name}</td>
-                              <td className="px-4 py-4 text-sm font-sans text-gray-600 truncate max-w-[120px] uppercase align-bottom">{assessment.address || getLocationFromPin(assessment.pin)}</td>
-                              <td className="px-4 py-4 text-sm font-sans text-gray-600 align-bottom whitespace-nowrap">{assessment.lot_no || '-'}</td>
-                              <td className="px-4 py-4 text-sm font-sans font-medium text-gray-700 align-bottom whitespace-nowrap">{assessment.td_no || '-'}</td>
-                              <td className="px-4 py-4 text-sm font-sans text-gray-600 align-bottom whitespace-nowrap">{assessment.total_area || '-'}</td>
-                              <td className="px-4 py-4 text-sm font-sans text-right font-mono text-gray-600 align-bottom">
+                              <td className="px-6 py-4 text-sm font-sans text-gray-600 truncate max-w-[120px] uppercase align-bottom">{assessment.address || getLocationFromPin(assessment.pin)}</td>
+                              <td className="px-6 py-4 text-sm font-sans text-gray-600 align-bottom whitespace-nowrap">{assessment.lot_no || '-'}</td>
+                              <td className="px-6 py-4 text-sm font-sans font-medium text-gray-700 align-bottom whitespace-nowrap">{assessment.td_no || '-'}</td>
+                              <td className="px-6 py-4 text-sm font-sans text-gray-600 align-bottom whitespace-nowrap">{assessment.total_area || '-'}</td>
+                              <td className="px-6 py-4 text-sm font-sans text-right font-mono text-gray-600 align-bottom">
                                 <span className="inline-flex items-center justify-end w-full">
                                   <span className="invisible">(</span>
                                   {parseFloat(String(assessment.property_assessed_value || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                                   <span className="invisible">)</span>
                                 </span>
                               </td>
-                              <td className="px-4 py-4 text-sm font-sans font-bold text-gray-900 align-bottom text-center">
+                              <td className="px-6 py-4 text-sm font-sans font-bold text-gray-900 align-bottom text-center">
                                 <button
                                   onClick={() => setExpandedAssessmentId(prev => prev === assessment.id ? null : assessment.id)}
                                   className="text-indigo-600 hover:text-indigo-800 font-bold font-sans text-sm underline underline-offset-4 decoration-indigo-200"
@@ -1446,7 +1479,7 @@ export default function CollectorPanel() {
                                   {parseFloat(String(assessment.amount || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                                 </button>
                               </td>
-                              <td className="px-4 py-4 text-sm font-sans align-bottom">
+                              <td className="px-6 py-4 text-sm font-sans align-bottom">
                                 <Input
                                   placeholder="7-9 digits"
                                   maxLength={9}
@@ -1495,11 +1528,11 @@ export default function CollectorPanel() {
                                     <table className="w-full text-sm text-left">
                                       <thead className="bg-indigo-50/50 border-b border-indigo-100">
                                         <tr>
-                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider align-bottom">Years<br />Covered</th>
-                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-center align-bottom">No. of<br />Years</th>
-                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">Assessed<br />Value</th>
-                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">Basic<br />Tax</th>
-                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">SEF<br />Tax</th>
+                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider align-bottom">Years Covered</th>
+                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-center align-bottom">No. of Years</th>
+                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">Assessed Value</th>
+                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">Basic Tax</th>
+                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">SEF Tax</th>
                                           <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">Interest</th>
                                           <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">Discount</th>
                                           <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">Total</th>
@@ -1607,10 +1640,10 @@ export default function CollectorPanel() {
                   <tr>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-left align-bottom">Registered Owner</th>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-left align-bottom">PIN</th>
-                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-left align-bottom">Years<br />Covered</th>
-                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Assessed<br />Value</th>
-                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Basic<br />Tax</th>
-                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">SEF<br />Tax</th>
+                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-left align-bottom">Years Covered</th>
+                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Assessed Value</th>
+                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Basic Tax</th>
+                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">SEF Tax</th>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Interest</th>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Discount</th>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Total</th>

@@ -1749,6 +1749,84 @@ export default function AdminPanel() {
     }
   };
 
+  const handleUnlinkSingle = async (
+    e: React.MouseEvent<HTMLButtonElement>,
+    propertyId: number,
+    isRptarContext: boolean = false
+  ) => {
+    e.stopPropagation();
+
+    if (!window.confirm('Unlink this property from the taxpayer?')) return;
+
+    try {
+      const property =
+        searchResults.find((p) => p.id === propertyId) ||
+        rptarSearchResults.find((p) => p.id === propertyId) ||
+        selectedProperties.find((p) => p.id === propertyId);
+
+      const payload: { property_ids: number[]; taxpayer_id?: number } = {
+        property_ids: [propertyId]
+      };
+
+      // When we can infer a single owner, unlink only that owner for safer behavior.
+      const inferredTaxpayerId =
+        property?.owners?.length === 1
+          ? property.owners[0].id
+          : property?.owner_id || undefined;
+
+      if (inferredTaxpayerId) {
+        payload.taxpayer_id = inferredTaxpayerId;
+      }
+
+      const res = await fetch('/api/admin/unlink-property', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const contentType = res.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          const data = await res.json();
+          throw new Error(data.error || 'Failed to unlink property');
+        }
+        throw new Error(`Server error: ${res.status} ${res.statusText}`);
+      }
+
+      setSearchResults((prev) =>
+        prev.map((p) =>
+          p.id === propertyId
+            ? { ...p, linked_taxpayer: null, owner_id: null, owners: [] }
+            : p
+        )
+      );
+      setRptarSearchResults((prev) =>
+        prev.map((p) =>
+          p.id === propertyId
+            ? { ...p, linked_taxpayer: null, owner_id: null, owners: [] }
+            : p
+        )
+      );
+      setSelectedProperties((prev) => prev.filter((p) => p.id !== propertyId));
+      setPropertyDetails((prev) => {
+        const next = { ...prev };
+        delete next[propertyId];
+        return next;
+      });
+
+      if (isRptarContext) {
+        if (rptarSearchQuery.trim()) {
+          await handleRptarSearch(null, rptarSearchQuery);
+        }
+      } else if (searchQuery.trim()) {
+        await handleSearch(searchQuery);
+      }
+    } catch (err: any) {
+      console.error('Unlink property error:', err);
+      alert(err.message || 'Failed to unlink property');
+    }
+  };
+
   const togglePropertySelection = (prop: Property) => {
     setSubmitStatus('idle');
     setSelectedProperties(prev => {
