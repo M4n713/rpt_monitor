@@ -1674,24 +1674,27 @@ export default function AdminPanel() {
     const conflicts = alreadyTagged.filter(p => !p.owners?.some(o => o.id.toString() === tagForm.taxpayer_id));
 
     if (conflicts.length > 0) {
-      const confirmMessage = `Warning: The following properties are already tagged to OTHER taxpayers:\n${conflicts.map(p => `- ${p.pin} (${p.linked_taxpayer})`).join('\n')}\n\nDo you want to proceed with adding another claimant?`;
-      if (!confirm(confirmMessage)) {
+      const conflictNames = conflicts.map(p => `- ${p.pin} (${p.owners?.map(o => o.name).join(', ')})`).join('\n');
+      const confirmMessage = `Warning: The following properties are already tagged to OTHER taxpayers:\n${conflictNames}\n\nDo you want to proceed with adding another claimant?`;
+      if (!window.confirm(confirmMessage)) {
         return;
       }
     }
 
+    setSubmitStatus('linking');
     try {
       const res = await fetch('/api/admin/link-property', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           properties: selectedProperties.map(p => ({
-            id: p.id,
+            // Ensure IDs are numbers for PostgreSQL
+            id: Number(p.id),
             ownership_type: propertyDetails[p.id]?.ownership_type || 'full',
             claimed_area: propertyDetails[p.id]?.ownership_type === 'shared' ? propertyDetails[p.id]?.claimed_area : ''
           })),
           taxpayer_id: Number(tagForm.taxpayer_id),
-          assigned_collector_id: tagForm.assigned_collector_id
+          assigned_collector_id: tagForm.assigned_collector_id ? Number(tagForm.assigned_collector_id) : null
         }),
       });
 
@@ -1717,7 +1720,6 @@ export default function AdminPanel() {
         if (!taxpayerTimeIn[tagForm.taxpayer_id]) {
           setTaxpayerTimeIn(prev => ({ ...prev, [tagForm.taxpayer_id]: getPHTimeNow().toISOString() }));
         }
-        // setShowComputation(true); // Don't auto-switch to computation if we want to show "Linked" state
 
         // Refresh list and update selection with new data (to reflect new owners)
         const newData = await handleSearch();
@@ -1727,87 +1729,23 @@ export default function AdminPanel() {
 
         fetchTaxpayerProperties(tagForm.taxpayer_id); // Refresh properties for computation
         fetchUsers(); // Refresh users for assigned collector
+
+        // Reset status after a delay
+        setTimeout(() => setSubmitStatus('idle'), 3000);
       } else {
         const contentType = res.headers.get('content-type');
         if (contentType && contentType.includes('application/json')) {
           const data = await res.json();
-          alert(data.error || 'Failed to link properties');
+          alert(`${data.error || 'Failed to link properties'}${data.details ? ': ' + data.details : ''}`);
         } else {
-          alert('Server error occurred');
+          alert(`Server error: ${res.status} ${res.statusText}`);
         }
+        setSubmitStatus('idle');
       }
     } catch (err) {
       console.error('Tagging error', err);
-    }
-  };
-
-  const handleUnlink = async () => {
-    if (selectedProperties.length === 0) return;
-
-    const taxpayerId = tagForm.taxpayer_id ? Number(tagForm.taxpayer_id) : null;
-
-    try {
-      const res = await fetch('/api/admin/unlink-property', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_ids: selectedProperties.map(p => p.id),
-          taxpayer_id: taxpayerId
-        }),
-      });
-
-      if (res.ok) {
-        setSelectedProperties([]);
-        setTagForm({ taxpayer_id: '', assigned_collector_id: '' });
-        setPropertyDetails({});
-        handleSearch();
-      } else {
-        const contentType = res.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const data = await res.json();
-          console.error(data.error || 'Failed to unlink properties');
-        } else {
-          console.error('Server error occurred');
-        }
-      }
-    } catch (err) {
-      console.error('Unlink error', err);
-    }
-  };
-
-  const handleUnlinkSingle = async (e: React.MouseEvent, propertyId: number, isRptar: boolean = false) => {
-    e.stopPropagation(); // Prevent selecting the property row
-    e.preventDefault();
-
-    try {
-      const res = await fetch('/api/admin/unlink-property', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_ids: [propertyId],
-          taxpayer_id: null // Unlink all owners
-        }),
-      });
-
-      if (res.ok) {
-        if (isRptar) {
-          handleRptarSearch({ preventDefault: () => { } } as React.FormEvent);
-        } else {
-          // Remove from selected properties if it was selected
-          setSelectedProperties(prev => prev.filter(p => p.id !== propertyId));
-          handleSearch(searchQuery);
-        }
-      } else {
-        const contentType = res.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const data = await res.json();
-          console.error(data.error || 'Failed to unlink property');
-        } else {
-          console.error('Server error occurred');
-        }
-      }
-    } catch (err) {
-      console.error('Unlink error', err);
+      alert('Network error or server is unreachable. Please check your connection.');
+      setSubmitStatus('idle');
     }
   };
 
@@ -2121,45 +2059,44 @@ export default function AdminPanel() {
                             </div>
                             <div>
                               {/* 1. Wrapped the name and badges in a flex container */}
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <h3 className="font-bold text-gray-900 text-xs">{prop.registered_owner_name}</h3>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h3 className="font-bold text-gray-900 text-xs">{prop.registered_owner_name}</h3>
 
-                                  <div className="flex items-center gap-1 flex-wrap">
-                                    {/* Status Badge */}
-                                    {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
-                                      <span className={`px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full border ${
-                                          (prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
-                                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                                          : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
-                                            ? 'bg-red-50 text-red-700 border-red-200'
-                                            : 'bg-blue-50 text-blue-700 border-blue-200'
-                                        }`}>
-                                        {prop.status}
-                                      </span>
-                                    )}
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {/* Status Badge */}
+                                  {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
+                                    <span className={`px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full border ${(prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
+                                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                      : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
+                                        ? 'bg-red-50 text-red-700 border-red-200'
+                                        : 'bg-blue-50 text-blue-700 border-blue-200'
+                                      }`}>
+                                      {prop.status}
+                                    </span>
+                                  )}
 
-                                    {/* Taxability Badge */}
-                                    {prop.taxability && (
-                                      <span className="px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                                        {prop.taxability}
-                                      </span>
-                                    )}
+                                  {/* Taxability Badge */}
+                                  {prop.taxability && (
+                                    <span className="px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                      {prop.taxability}
+                                    </span>
+                                  )}
 
-                                    {/* Classification Badge */}
-                                    {prop.classification && (
-                                      <span className="px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
-                                        {prop.classification}
-                                      </span>
-                                    )}
+                                  {/* Classification Badge */}
+                                  {prop.classification && (
+                                    <span className="px-1.5 py-0 text-[9px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+                                      {prop.classification}
+                                    </span>
+                                  )}
 
-                                    {/* Remarks Badge */}
-                                    {prop.remarks && (
-                                      <span className="px-1.5 py-0 text-[9px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
-                                        {prop.remarks}
-                                      </span>
-                                    )}
-                                  </div>
+                                  {/* Remarks Badge */}
+                                  {prop.remarks && (
+                                    <span className="px-1.5 py-0 text-[9px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
+                                      {prop.remarks}
+                                    </span>
+                                  )}
                                 </div>
+                              </div>
 
                               <div className="flex flex-wrap gap-2 mt-0.5">
                                 <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded">
@@ -3290,90 +3227,89 @@ export default function AdminPanel() {
                 {rptarSearchResults
                   .filter(p => !rptarSelectedPropertyId || p.id === rptarSelectedPropertyId)
                   .map((prop) => (
-                  <tr
-                    key={prop.id}
-                    className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
-                  >
-                    <td className="px-6 py-4 text-[11px] font-bold text-gray-600 uppercase tracking-tighter whitespace-nowrap">
-                      {prop.kind || prop.description || '-'}
-                    </td>
-                    <td className="px-6 py-4 text-gray-900 font-medium text-sm whitespace-normal break-words leading-tight">
-                      <div className="flex flex-col gap-1">
-                        <span>{prop.registered_owner_name}</span>
-                        <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap mt-1">
-                          {/* Status Badge */}
-                          {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
-                            <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${
-                                (prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
+                    <tr
+                      key={prop.id}
+                      className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                    >
+                      <td className="px-6 py-4 text-[11px] font-bold text-gray-600 uppercase tracking-tighter whitespace-nowrap">
+                        {prop.kind || prop.description || '-'}
+                      </td>
+                      <td className="px-6 py-4 text-gray-900 font-medium text-sm whitespace-normal break-words leading-tight">
+                        <div className="flex flex-col gap-1">
+                          <span>{prop.registered_owner_name}</span>
+                          <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap mt-1">
+                            {/* Status Badge */}
+                            {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
+                              <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${(prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
                                 ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                 : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
                                   ? 'bg-red-50 text-red-700 border-red-200'
                                   : 'bg-blue-50 text-blue-700 border-blue-200'
-                              }`}>
-                              {prop.status}
-                            </span>
-                          )}
-                          {prop.taxability && (
-                            <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                              {prop.taxability}
-                            </span>
-                          )}
-                          {prop.classification && (
-                            <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
-                              {prop.classification}
-                            </span>
-                          )}
-                          {prop.remarks && (
-                            <span className="px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
-                              {prop.remarks}
-                            </span>
-                          )}
+                                }`}>
+                                {prop.status}
+                              </span>
+                            )}
+                            {prop.taxability && (
+                              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                                {prop.taxability}
+                              </span>
+                            )}
+                            {prop.classification && (
+                              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+                                {prop.classification}
+                              </span>
+                            )}
+                            {prop.remarks && (
+                              <span className="px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
+                                {prop.remarks}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 text-gray-600 text-sm whitespace-normal break-words leading-tight">
-                      {prop.linked_taxpayer ? (
-                        <div className="flex flex-col gap-1 items-start">
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
-                            {prop.linked_taxpayer}
-                            <button
-                              onClick={(e) => handleUnlinkSingle(e, prop.id, true)}
-                              className="ml-1 p-0.5 hover:bg-green-200 rounded-full text-green-800 transition-colors"
-                              title="Unlink property"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-gray-400 text-xs italic">Not Tagged</span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 font-mono text-sm text-gray-600 whitespace-nowrap">{prop.pin}</td>
-                    <td className="px-6 py-4 font-mono text-sm text-gray-400 whitespace-nowrap">{prop.old_pin || '-'}</td>
-                    <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.td_no}</td>
-                    <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.lot_no}</td>
-                    <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">{prop.total_area || '-'}</td>
-                    <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">
-                      <span className="inline-flex items-center justify-end w-full">
-                        <span className="invisible">(</span>
-                        {parseFloat(String(prop.assessed_value || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        <span className="invisible">)</span>
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-center">
-                      <Button
-                        size="sm"
-                        variant={rptarSelectedPropertyId === prop.id ? "default" : "outline"}
-                        onClick={() => setRptarSelectedPropertyId(prop.id === rptarSelectedPropertyId ? null : prop.id)}
-                        className="h-8 text-xs gap-2"
-                      >
-                        <History className="w-3 h-3" />
-                        {rptarSelectedPropertyId === prop.id ? 'Hide History' : 'Payment History'}
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="px-6 py-4 text-gray-600 text-sm whitespace-normal break-words leading-tight">
+                        {prop.linked_taxpayer ? (
+                          <div className="flex flex-col gap-1 items-start">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                              {prop.linked_taxpayer}
+                              <button
+                                onClick={(e) => handleUnlinkSingle(e, prop.id, true)}
+                                className="ml-1 p-0.5 hover:bg-green-200 rounded-full text-green-800 transition-colors"
+                                title="Unlink property"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-gray-400 text-xs italic">Not Tagged</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 font-mono text-sm text-gray-600 whitespace-nowrap">{prop.pin}</td>
+                      <td className="px-6 py-4 font-mono text-sm text-gray-400 whitespace-nowrap">{prop.old_pin || '-'}</td>
+                      <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.td_no}</td>
+                      <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.lot_no}</td>
+                      <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">{prop.total_area || '-'}</td>
+                      <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">
+                        <span className="inline-flex items-center justify-end w-full">
+                          <span className="invisible">(</span>
+                          {parseFloat(String(prop.assessed_value || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                          <span className="invisible">)</span>
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        <Button
+                          size="sm"
+                          variant={rptarSelectedPropertyId === prop.id ? "default" : "outline"}
+                          onClick={() => setRptarSelectedPropertyId(prop.id === rptarSelectedPropertyId ? null : prop.id)}
+                          className="h-8 text-xs gap-2"
+                        >
+                          <History className="w-3 h-3" />
+                          {rptarSelectedPropertyId === prop.id ? 'Hide History' : 'Payment History'}
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
           </div>

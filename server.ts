@@ -541,6 +541,10 @@ const initDb = async (retries = 1, delay = 1000) => {
             ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS queue_date DATE;
+            ALTER TABLE taxpayer_logs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+            ALTER TABLE taxpayer_logs ADD COLUMN IF NOT EXISTS user_name TEXT;
+            ALTER TABLE taxpayer_logs ADD COLUMN IF NOT EXISTS role TEXT;
+            ALTER TABLE taxpayer_logs ADD COLUMN IF NOT EXISTS pins TEXT;
             ALTER TABLE taxpayer_logs ADD COLUMN IF NOT EXISTS remarks TEXT;
             -- Update role constraint if needed
             BEGIN
@@ -1288,8 +1292,8 @@ async function startServer() {
       res.json({ success: true, warning });
     } catch (err) {
       await dbQuery('ROLLBACK');
-      console.error('Link property error:', err);
-      res.status(500).json({ error: 'Failed to link properties' });
+      console.error('[DB ERROR] Link property failed for Taxpayer ID:', taxpayer_id, 'Error:', err);
+      res.status(500).json({ error: 'Failed to link properties', details: err instanceof Error ? err.message : String(err) });
     }
   });
 
