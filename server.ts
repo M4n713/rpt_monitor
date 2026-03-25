@@ -1639,7 +1639,7 @@ async function startServer() {
       // Latest daily queue number
       const { rows: maxRows } = await dbQuery('SELECT MAX(queue_number) as max_num FROM users WHERE queue_date = $1', [currentDay]);
       const nextNum = (maxRows[0].max_num || 0) + 1;
-      const formattedNum = `RPT-${String(nextNum).padStart(4, '0')}`;
+      const formattedNum = `RPT-${String(nextNum).padStart(3, '0')}`;
 
       if (existingRows.length > 0) {
         // Re-queue existing user
@@ -2131,7 +2131,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/queue/active', authenticateToken, async (req, res) => {
+  app.get('/api/queue/active', async (req, res) => {
     try {
       const currentDay = new Date().toISOString().split('T')[0];
       const { rows } = await dbQuery(`
@@ -2144,6 +2144,52 @@ async function startServer() {
     } catch (err) {
       console.error('Fetch active queue error:', err);
       res.status(500).json({ error: 'Failed to fetch active queue' });
+    }
+  });
+
+  app.get('/api/queue/now-serving', async (req, res) => {
+    try {
+      const currentDay = new Date().toISOString().split('T')[0];
+      // Find the most recently started session from CURRENT DAY that is still open
+      const { rows } = await dbQuery(`
+        SELECT u.queue_number 
+        FROM taxpayer_logs tl
+        JOIN users u ON tl.taxpayer_id = u.id
+        WHERE tl.time_out IS NULL AND u.queue_number IS NOT NULL AND u.queue_date = $1
+        ORDER BY tl.time_in DESC
+        LIMIT 1
+      `, [currentDay]);
+      
+      if (rows.length > 0) {
+        res.json({ queue_number: rows[0].queue_number });
+      } else {
+        // Fallback to the last notified user of the CURRENT DAY if no active logs
+        const { rows: backupRows } = await dbQuery(`
+          SELECT queue_number FROM users 
+          WHERE notified = TRUE AND queue_number IS NOT NULL AND queue_date = $1
+          ORDER BY notified_at DESC LIMIT 1
+        `, [currentDay]);
+        res.json({ queue_number: backupRows[0]?.queue_number || null });
+      }
+    } catch (err) {
+      console.error('Fetch now serving error:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.get('/api/queue/stats', async (req, res) => {
+    try {
+      const { rows } = await dbQuery(`
+        SELECT COUNT(*) as active_collectors
+        FROM users 
+        WHERE (role = 'collector' OR role = 'admin') 
+        AND last_active_at > $1
+      `, [new Date(Date.now() - 5 * 60 * 1000).toISOString()]);
+      
+      res.json({ active_collectors: parseInt(rows[0].active_collectors) || 0 });
+    } catch (err) {
+      console.error('Fetch queue stats error:', err);
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 

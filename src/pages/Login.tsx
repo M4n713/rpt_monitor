@@ -124,11 +124,11 @@ export default function Login() {
               href="/queue"
               onClick={(e) => {
                 e.preventDefault();
-                window.open('/queue', 'QueueKioskWindow', 'width=1024,height=768,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes');
+                window.open('/queue', `QueueKiosk_${Date.now()}`, 'width=1024,height=768,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes');
               }}
               className="text-xs font-bold text-slate-400 hover:text-blue-600 transition-colors uppercase tracking-widest mt-2"
             >
-              Public Queue Kiosk
+              RPT Queueing System
             </a>
           </div>
         </CardFooter>
