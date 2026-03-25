@@ -121,6 +121,46 @@ const getLocationFromPin = (pin: string) => {
   }
 };
 
+const FormattedCurrencyInput = ({ value, onChange, className }: { value: string | number, onChange: (val: string) => void, className?: string }) => {
+  const [internalValue, setInternalValue] = useState("");
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) {
+      if (value === "" || value === undefined || value === null) {
+        setInternalValue("");
+      } else {
+        const num = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+        if (isNaN(num)) {
+          setInternalValue("");
+        } else {
+          setInternalValue(num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+        }
+      }
+    } else {
+      // When focused, strip commas for easy editing
+      setInternalValue(String(value).replace(/,/g, ''));
+    }
+  }, [value, isFocused]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInternalValue(e.target.value);
+    const rawValue = e.target.value.replace(/[^0-9.-]/g, '');
+    onChange(rawValue);
+  };
+
+  return (
+    <Input
+      type={isFocused ? "number" : "text"}
+      className={className}
+      value={internalValue}
+      onChange={handleChange}
+      onFocus={() => setIsFocused(true)}
+      onBlur={() => setIsFocused(false)}
+    />
+  );
+};
+
 const STANDARD_RANGES = [
   [1974, 1978], [1979, 1984], [1985, 1991], [1992, 1994],
   [1995, 1997], [1998, 2000], [2001, 2003], [2004, 2006],
@@ -686,6 +726,18 @@ export default function CollectorPanel() {
       }
 
       if (generatedItems.length > 0) {
+        // Derive the overall year range covered by the extracted data
+        let overallMin = Infinity;
+        let overallMax = -Infinity;
+        for (const gi of generatedItems) {
+          const parts = String(gi.year).split('-');
+          const s = parseInt(parts[0]);
+          const eEnd = parts.length > 1 ? parseInt(parts[1]) : s;
+          if (s < overallMin) overallMin = s;
+          if (eEnd > overallMax) overallMax = eEnd;
+        }
+        const rangeLabel = overallMin === overallMax ? `${overallMin}` : `${overallMin}-${overallMax}`;
+        setPaymentForm(prev => ({ ...prev, year: rangeLabel }));
         setPreviewItems(generatedItems);
         alert(`Successfully extracted and added ${generatedItems.length} ranges from PDF.`);
       } else {
@@ -822,11 +874,12 @@ export default function CollectorPanel() {
         // New logic: Input -> Preview Table -> Queue.
 
         // If manual range, show 1 row.
-        const result = calculateTaxForRange(start, end, prop, type, undefined);
+        const avToUse = start < 2016 ? 0 : prop.assessed_value;
+        const result = calculateTaxForRange(start, end, prop, type, avToUse);
         items.push({
           year: yearInput,
           yearCount: end - start + 1,
-          assessed_value: prop.assessed_value, // Default to prop AV
+          assessed_value: avToUse,
           ...result,
           amount: Number(result.amount),
           isManual: true
@@ -835,11 +888,12 @@ export default function CollectorPanel() {
     } else {
       const year = parseInt(yearInput);
       if (!isNaN(year)) {
-        const result = calculateTaxForRange(year, year, prop, type, undefined);
+        const avToUse = year < 2016 ? 0 : prop.assessed_value;
+        const result = calculateTaxForRange(year, year, prop, type, avToUse);
         items.push({
           year: yearInput,
           yearCount: 1,
-          assessed_value: prop.assessed_value,
+          assessed_value: avToUse,
           ...result,
           amount: Number(result.amount),
           isManual: true
@@ -888,7 +942,7 @@ export default function CollectorPanel() {
 
       if (range) {
         const endYear = range[1];
-        const avToUse = prop.assessed_value;
+        const avToUse = currentStart < 2016 ? 0 : prop.assessed_value;
         const result = calculateTaxForRange(currentStart, endYear, prop, paymentForm.computationType, avToUse);
         generatedItems.push({
           property_id: parseInt(selectedPropertyId),
@@ -903,7 +957,7 @@ export default function CollectorPanel() {
         });
         currentStart = endYear + 1;
       } else {
-        const avToUse = prop.assessed_value;
+        const avToUse = currentStart < 2016 ? 0 : prop.assessed_value;
         const result = calculateTaxForRange(currentStart, currentStart, prop, paymentForm.computationType, avToUse);
         generatedItems.push({
           property_id: parseInt(selectedPropertyId),
@@ -1092,6 +1146,23 @@ export default function CollectorPanel() {
     const newPreview = [...previewItems];
     newPreview.splice(index, 1);
     setPreviewItems(newPreview);
+
+    // Sync the Year/Range input to the remaining items
+    if (newPreview.length > 0) {
+      let overallMin = Infinity;
+      let overallMax = -Infinity;
+      for (const gi of newPreview) {
+        const parts = String(gi.year).split('-');
+        const s = parseInt(parts[0]);
+        const e = parts.length > 1 ? parseInt(parts[1]) : s;
+        if (s < overallMin) overallMin = s;
+        if (e > overallMax) overallMax = e;
+      }
+      const rangeLabel = overallMin === overallMax ? `${overallMin}` : `${overallMin}-${overallMax}`;
+      setPaymentForm(prev => ({ ...prev, year: rangeLabel }));
+    } else {
+      setPaymentForm(prev => ({ ...prev, year: '' }));
+    }
   };
 
   const handlePayment = async () => {
@@ -1222,6 +1293,38 @@ export default function CollectorPanel() {
     // Limit to max 9 digits
     const limited = digitsOnly.slice(0, 9);
     setOrInputs(prev => ({ ...prev, [id]: limited }));
+  };
+
+  const handleAssessmentValueChange = (assessmentId: number, newValue: string) => {
+    setPendingAssessments(prev => prev.map(a => {
+      if (a.id !== assessmentId) return a;
+      
+      const prop = properties.find(p => p.id === a.property_id);
+      if (!prop) return a;
+
+      let startYear, endYear;
+      if (a.year.includes('-')) {
+        const parts = a.year.split('-');
+        startYear = parseInt(parts[0]);
+        endYear = parseInt(parts[1]);
+      } else {
+        startYear = parseInt(a.year);
+        endYear = startYear;
+      }
+
+      const manualAV = parseFloat(newValue.replace(/,/g, ''));
+      const result = calculateTaxForRange(startYear, endYear, prop, 'standard', isNaN(manualAV) ? 0 : manualAV);
+
+      return {
+        ...a,
+        property_assessed_value: newValue, // Keep as string for input
+        basic_tax: result.basic_tax,
+        sef_tax: result.sef_tax,
+        interest: result.interest,
+        discount: result.discount,
+        amount: result.amount
+      };
+    }));
   };
 
   const handleRemoveAssessment = async (assessmentId: number) => {
@@ -1547,11 +1650,27 @@ export default function CollectorPanel() {
                                               : 1}
                                           </td>
                                           <td className="px-4 py-3 text-right font-mono text-gray-600">
-                                            <span className="inline-flex items-center justify-end w-full">
-                                              <span className="invisible">(</span>
-                                              {parseFloat(String(assessment.property_assessed_value || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                              <span className="invisible">)</span>
-                                            </span>
+                                            {(() => {
+                                              const startYear = parseInt(assessment.year.split('-')[0]);
+                                              const isEditable = startYear <= 2015;
+                                              return isEditable ? (
+                                                <span className="inline-flex items-center justify-end w-full">
+                                                  <span className="invisible">(</span>
+                                                  <FormattedCurrencyInput
+                                                    className="w-32 text-right ml-auto h-8 bg-white border-indigo-200 no-spinner font-mono text-gray-900"
+                                                    value={assessment.property_assessed_value}
+                                                    onChange={(val) => handleAssessmentValueChange(assessment.id, val)}
+                                                  />
+                                                  <span className="invisible">)</span>
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center justify-end w-full">
+                                                  <span className="invisible">(</span>
+                                                  {parseFloat(String(assessment.property_assessed_value || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                                  <span className="invisible">)</span>
+                                                </span>
+                                              );
+                                            })()}
                                           </td>
                                           <td className="px-4 py-3 text-right font-mono text-gray-600">
                                             <span className="inline-flex items-center justify-end w-full">
@@ -1828,10 +1947,9 @@ export default function CollectorPanel() {
                     <Button
                       type="button"
                       variant="outline"
-                      size="sm"
                       onClick={handleGenerateRanges}
                       disabled={!paymentForm.year}
-                      className="text-[10px] uppercase font-bold"
+                      className="h-12 text-sm font-semibold px-3 leading-tight w-24 whitespace-normal"
                     >
                       Generate Ranges
                     </Button>
@@ -1846,12 +1964,11 @@ export default function CollectorPanel() {
                       <Button
                         type="button"
                         variant="outline"
-                        size="sm"
                         onClick={() => pdfInputRef.current?.click()}
                         disabled={isPdfProcessing}
-                        className="text-[10px] uppercase font-bold gap-2"
+                        className="h-12 text-sm font-semibold gap-2 px-3 leading-tight w-24 whitespace-normal"
                       >
-                        {isPdfProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />}
+                        {isPdfProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-2" />}
                         Upload PDF
                       </Button>
                     </div>
@@ -1895,11 +2012,10 @@ export default function CollectorPanel() {
                               {isEditable ? (
                                 <span className="inline-flex items-center justify-end w-full">
                                   <span className="invisible">(</span>
-                                  <Input
-                                    type="number"
-                                    className="w-32 text-right ml-auto h-8"
+                                  <FormattedCurrencyInput
+                                    className="w-32 text-right ml-auto h-8 font-mono text-gray-900"
                                     value={item.assessed_value}
-                                    onChange={(e) => handlePreviewItemChange(idx, 'assessed_value', e.target.value)}
+                                    onChange={(val) => handlePreviewItemChange(idx, 'assessed_value', val)}
                                   />
                                   <span className="invisible">)</span>
                                 </span>

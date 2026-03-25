@@ -162,6 +162,46 @@ const getPHTimeNow = (): Date => {
   return new Date(utcDate.getTime() + offset + (8 * 60 * 60 * 1000));
 };
 
+const FormattedCurrencyInput = ({ value, onChange, className }: { value: string | number, onChange: (val: string) => void, className?: string }) => {
+  const [internalValue, setInternalValue] = useState("");
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) {
+      if (value === "" || value === undefined || value === null) {
+        setInternalValue("");
+      } else {
+        const num = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+        if (isNaN(num)) {
+          setInternalValue("");
+        } else {
+          setInternalValue(num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+        }
+      }
+    } else {
+      // When focused, strip commas for easy editing
+      setInternalValue(String(value).replace(/,/g, ''));
+    }
+  }, [value, isFocused]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInternalValue(e.target.value);
+    const rawValue = e.target.value.replace(/[^0-9.-]/g, '');
+    onChange(rawValue);
+  };
+
+  return (
+    <Input
+      type={isFocused ? "number" : "text"}
+      className={className}
+      value={internalValue}
+      onChange={handleChange}
+      onFocus={() => setIsFocused(true)}
+      onBlur={() => setIsFocused(false)}
+    />
+  );
+};
+
 const STANDARD_RANGES = [
   [1974, 1978], [1979, 1984], [1985, 1991], [1992, 1994],
   [1995, 1997], [1998, 2000], [2001, 2003], [2004, 2006],
@@ -1213,7 +1253,8 @@ export default function AdminPanel() {
           ? (new Date(prop.last_payment_date).getFullYear() + 1).toString()
           : getPHTimeNow().getFullYear().toString();
 
-        const assessedVal = prop.assessed_value || 0;
+        const defaultYearNum = parseInt(defaultYear);
+        const assessedVal = defaultYearNum >= 2016 ? (prop.assessed_value || 0) : 0;
         const basic = assessedVal * 0.01;
         const sef = assessedVal * 0.01;
 
@@ -1266,6 +1307,42 @@ export default function AdminPanel() {
 
     if (!paymentForm.year) return;
 
+    // Prevent overwriting carefully built sums if the year input exactly matches the queue's boundary.
+    // Instead, definitively sync the Computation Breakdown panel to the queue's Grand Totals.
+    if (paymentQueue.length > 0) {
+      let overallMin = Infinity;
+      let overallMax = -Infinity;
+      let qBasic = 0, qSef = 0, qInterest = 0, qDiscount = 0, qAmount = 0;
+      
+      for (const qi of paymentQueue) {
+        const parts = String(qi.year).split('-');
+        const s = parseInt(parts[0].trim());
+        const e = parts.length > 1 ? parseInt(parts[1].trim()) : s;
+        if (s < overallMin) overallMin = s;
+        if (e > overallMax) overallMax = e;
+        
+        qBasic += parseFloat(String(qi.basic_tax || 0));
+        qSef += parseFloat(String(qi.sef_tax || 0));
+        qInterest += parseFloat(String(qi.interest || 0));
+        qDiscount += parseFloat(String(qi.discount || 0));
+        qAmount += parseFloat(String(qi.amount || 0));
+      }
+      
+      const rangeLabel = overallMin === overallMax ? `${overallMin}` : `${overallMin}-${overallMax}`;
+      if (paymentForm.year === rangeLabel) {
+        // The UI input exactly covers the queue. Sync the breakdown to the queue totals and abort single-calc!
+        setPaymentForm(prev => ({
+          ...prev,
+          basic_tax: qBasic.toFixed(2),
+          sef_tax: qSef.toFixed(2),
+          interest: qInterest.toFixed(2),
+          discount: qDiscount.toFixed(2),
+          amount: qAmount.toFixed(2)
+        }));
+        return;
+      }
+    }
+
     let startYear: number;
     let endYear: number;
 
@@ -1280,12 +1357,14 @@ export default function AdminPanel() {
 
     if (isNaN(startYear) || isNaN(endYear)) return;
 
-    // Auto-fill assessed value for 2016 onwards
-    if (startYear >= 2016) {
-      if (paymentForm.assessed_value !== prop.assessed_value.toString()) {
-        setPaymentForm(prev => ({ ...prev, assessed_value: prop.assessed_value.toString() }));
-        return; // Effect will re-run with new value
-      }
+    // Auto-fill/Reset assessed value based on year
+    const targetAV = startYear >= 2016 ? prop.assessed_value.toString() : (paymentForm.assessed_value || '0');
+    if (startYear >= 2016 && paymentForm.assessed_value !== targetAV) {
+      setPaymentForm(prev => ({ ...prev, assessed_value: targetAV }));
+      return;
+    } else if (startYear < 2016 && !paymentForm.assessed_value) {
+      setPaymentForm(prev => ({ ...prev, assessed_value: '0' }));
+      return;
     }
 
     const manualAV = parseFloat(paymentForm.assessed_value);
@@ -1300,7 +1379,7 @@ export default function AdminPanel() {
       amount: result.amount
     }));
 
-  }, [paymentForm.year, paymentForm.computationType, paymentForm.assessed_value, selectedComputationPropertyId]);
+  }, [paymentForm.year, paymentForm.computationType, paymentForm.assessed_value, selectedComputationPropertyId, paymentQueue]);
   // Recalculate all payment queue items when computation type changes
   useEffect(() => {
     setPaymentQueue(prevQueue => {
@@ -1377,15 +1456,15 @@ export default function AdminPanel() {
 
       if (range) {
         const endYear = Math.min(range[1], endYearLimit);
-        const avToUse = currentStart >= 2016 ? prop.assessed_value : parseFloat(paymentForm.assessed_value);
-        const result = calculateTaxForRange(currentStart, endYear, prop, paymentForm.computationType, isNaN(avToUse) ? undefined : avToUse);
+        const avToUse = currentStart >= 2016 ? prop.assessed_value : (paymentForm.assessed_value ? parseFloat(paymentForm.assessed_value) : 0);
+        const result = calculateTaxForRange(currentStart, endYear, prop, paymentForm.computationType, isNaN(avToUse) ? 0 : avToUse);
 
         generatedItems.push({
           property_id: parseInt(selectedComputationPropertyId),
           pin: prop.pin,
           year: currentStart === endYear ? currentStart.toString() : `${currentStart}-${endYear}`,
           yearCount: endYear - currentStart + 1,
-          assessed_value: isNaN(avToUse) ? prop.assessed_value : avToUse,
+          assessed_value: isNaN(avToUse) ? 0 : avToUse,
           ...result,
           or_no: paymentForm.or_no,
           computationType: paymentForm.computationType,
@@ -1393,15 +1472,15 @@ export default function AdminPanel() {
         });
         currentStart = endYear + 1;
       } else {
-        const avToUse = currentStart >= 2016 ? prop.assessed_value : parseFloat(paymentForm.assessed_value);
-        const result = calculateTaxForRange(currentStart, currentStart, prop, paymentForm.computationType, isNaN(avToUse) ? undefined : avToUse);
+        const avToUse = currentStart >= 2016 ? prop.assessed_value : (paymentForm.assessed_value ? parseFloat(paymentForm.assessed_value) : 0);
+        const result = calculateTaxForRange(currentStart, currentStart, prop, paymentForm.computationType, isNaN(avToUse) ? 0 : avToUse);
 
         generatedItems.push({
           property_id: parseInt(selectedComputationPropertyId),
           pin: prop.pin,
           year: currentStart.toString(),
           yearCount: 1,
-          assessed_value: isNaN(avToUse) ? prop.assessed_value : avToUse,
+          assessed_value: isNaN(avToUse) ? 0 : avToUse,
           ...result,
           or_no: paymentForm.or_no,
           computationType: paymentForm.computationType,
@@ -1412,19 +1491,32 @@ export default function AdminPanel() {
     }
 
     // 4. Add items to the table
-    setPaymentQueue([...paymentQueue, ...generatedItems]);
+    const allQueueItems = [...paymentQueue, ...generatedItems];
+    setPaymentQueue(allQueueItems);
 
-    // 5. Determine the final text to show in the input box
+    // 5. Sum totals across ALL queue items (existing + newly generated)
+    let totalBasic = 0, totalSef = 0, totalInterest = 0, totalDiscount = 0, totalAmount = 0;
+    for (const qi of allQueueItems) {
+      totalBasic += parseFloat(String(qi.basic_tax || 0));
+      totalSef += parseFloat(String(qi.sef_tax || 0));
+      totalInterest += parseFloat(String(qi.interest || 0));
+      totalDiscount += parseFloat(String(qi.discount || 0));
+      totalAmount += parseFloat(String(qi.amount || 0));
+    }
+
+    // 6. Determine the final text to show in the input box
     const finalRangeLabel = startYear === endYearLimit ? `${startYear}` : `${startYear}-${endYearLimit}`;
 
-    // 6. Reset the form (clears other fields)
+    // 7. Reset form then restore all meaningful fields
     resetForm();
-
-    // 7. Update the "Year / Range" input to show the generated range!
-    // (We do this AFTER resetForm so it doesn't accidentally get cleared)
     setPaymentForm(prev => ({
       ...prev,
-      year: finalRangeLabel
+      year: finalRangeLabel,
+      basic_tax: totalBasic.toFixed(2),
+      sef_tax: totalSef.toFixed(2),
+      interest: totalInterest.toFixed(2),
+      discount: totalDiscount.toFixed(2),
+      amount: totalAmount.toFixed(2)
     }));
   };
 
@@ -1440,6 +1532,40 @@ export default function AdminPanel() {
       amount: '',
       computationType: prev.computationType // <-- Preserve the selected computation type
     }));
+  };
+
+  const handleQueueAssessmentChange = (index: number, newValue: string) => {
+    const newQueue = [...paymentQueue];
+    const item = newQueue[index];
+    
+    const prop = properties.find(p => p.id === item.property_id);
+    if (!prop) return;
+
+    let startYear, endYear;
+    const yearStr = String(item.year);
+    if (yearStr.includes('-')) {
+      const parts = yearStr.split('-');
+      startYear = parseInt(parts[0].trim(), 10);
+      endYear = parseInt(parts[1].trim(), 10);
+    } else {
+      startYear = parseInt(yearStr, 10);
+      endYear = startYear;
+    }
+
+    const manualAV = parseFloat(newValue.replace(/,/g, ''));
+    const result = calculateTaxForRange(startYear, endYear, prop, item.computationType || paymentForm.computationType, isNaN(manualAV) ? 0 : manualAV);
+
+    newQueue[index] = {
+      ...item,
+      assessed_value: newValue,
+      basic_tax: result.basic_tax,
+      sef_tax: result.sef_tax,
+      interest: result.interest,
+      discount: result.discount,
+      amount: Number(result.amount)
+    };
+
+    setPaymentQueue(newQueue);
   };
   const addToQueue = () => {
     if (!selectedComputationPropertyId || !paymentForm.amount) return;
@@ -1507,6 +1633,45 @@ export default function AdminPanel() {
     const newQueue = [...paymentQueue];
     newQueue.splice(index, 1);
     setPaymentQueue(newQueue);
+
+    // Sync Year/Range input and Computation Breakdown to the remaining items
+    if (newQueue.length > 0) {
+      let overallMin = Infinity;
+      let overallMax = -Infinity;
+      let totalBasic = 0, totalSef = 0, totalInterest = 0, totalDiscount = 0, totalAmount = 0;
+      for (const qi of newQueue) {
+        const parts = String(qi.year).split('-');
+        const s = parseInt(parts[0].trim());
+        const e = parts.length > 1 ? parseInt(parts[1].trim()) : s;
+        if (s < overallMin) overallMin = s;
+        if (e > overallMax) overallMax = e;
+        totalBasic += parseFloat(String(qi.basic_tax || 0));
+        totalSef += parseFloat(String(qi.sef_tax || 0));
+        totalInterest += parseFloat(String(qi.interest || 0));
+        totalDiscount += parseFloat(String(qi.discount || 0));
+        totalAmount += parseFloat(String(qi.amount || 0));
+      }
+      const rangeLabel = overallMin === overallMax ? `${overallMin}` : `${overallMin}-${overallMax}`;
+      setPaymentForm(prev => ({
+        ...prev,
+        year: rangeLabel,
+        basic_tax: totalBasic.toFixed(2),
+        sef_tax: totalSef.toFixed(2),
+        interest: totalInterest.toFixed(2),
+        discount: totalDiscount.toFixed(2),
+        amount: totalAmount.toFixed(2)
+      }));
+    } else {
+      setPaymentForm(prev => ({
+        ...prev,
+        year: '',
+        basic_tax: '',
+        sef_tax: '',
+        interest: '',
+        discount: '',
+        amount: ''
+      }));
+    }
   };
 
   const handleSubmitAssessment = async () => {
@@ -2486,15 +2651,14 @@ export default function AdminPanel() {
                         value={paymentForm.year}
                         onChange={e => setPaymentForm({ ...paymentForm, year: e.target.value })}
                         required
-                        className="flex-1"
+                        className="h-12 rounded-none flex-1"
                       />
                       <Button
                         type="button"
                         variant="outline"
-                        size="sm"
                         onClick={handleGenerateRanges}
                         disabled={!paymentForm.year}
-                        className="text-[10px] uppercase font-bold"
+                        className="h-12 rounded-none text-sm font-semibold px-3 leading-tight w-24 whitespace-normal"
                       >
                         Generate Ranges
                       </Button>
@@ -2509,12 +2673,11 @@ export default function AdminPanel() {
                         <Button
                           type="button"
                           variant="outline"
-                          size="sm"
                           onClick={() => pdfInputRef.current?.click()}
                           disabled={isPdfProcessing}
-                          className="text-[10px] uppercase font-bold gap-2"
+                          className="h-12 rounded-none text-sm font-semibold gap-2 px-3 leading-tight w-24 whitespace-normal"
                         >
-                          {isPdfProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />}
+                          {isPdfProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-2" />}
                           Upload PDF
                         </Button>
                       </div>
@@ -2613,11 +2776,27 @@ export default function AdminPanel() {
                       <td className="px-4 py-4 text-gray-600 font-medium">{item.year}</td>
                       <td className="px-4 py-4 text-gray-600 text-center">{item.yearCount || 1}</td>
                       <td className="px-4 py-4 text-right font-mono text-gray-600">
-                        <span className="inline-flex items-center justify-end w-full">
-                          <span className="invisible">(</span>
-                          {parseFloat(String(item.assessed_value || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          <span className="invisible">)</span>
-                        </span>
+                        {(() => {
+                          const startYear = parseInt(String(item.year).split('-')[0].trim());
+                          const isEditable = startYear <= 2015;
+                          return isEditable ? (
+                            <span className="inline-flex items-center justify-end w-full">
+                              <span className="invisible">(</span>
+                              <FormattedCurrencyInput
+                                className="w-32 text-right ml-auto h-8 bg-white border-blue-200 no-spinner font-mono text-gray-900"
+                                value={item.assessed_value}
+                                onChange={(val) => handleQueueAssessmentChange(idx, val)}
+                              />
+                              <span className="invisible">)</span>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center justify-end w-full">
+                              <span className="invisible">(</span>
+                              {parseFloat(String(item.assessed_value || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                              <span className="invisible">)</span>
+                            </span>
+                          );
+                        })()}
                       </td>
                       <td className="px-4 py-4 text-right font-mono text-gray-600">
                         <span className="inline-flex items-center justify-end w-full">
@@ -3654,6 +3833,29 @@ export default function AdminPanel() {
       }
 
       if (newItems.length > 0) {
+        // Derive the overall year range from extracted data and update the Year/Range input
+        const overallMin = groupedRanges.reduce((min, r) => Math.min(min, r.startYear), Infinity);
+        const overallMax = groupedRanges.reduce((max, r) => Math.max(max, r.endYear), -Infinity);
+        const rangeLabel = overallMin === overallMax ? `${overallMin}` : `${overallMin}-${overallMax}`;
+
+        // Sum totals from all items (existing queue + new PDF items)
+        const allItems = [...paymentQueue, ...newItems];
+        const totalBasic = allItems.reduce((s, qi) => s + parseFloat(String(qi.basic_tax || 0)), 0);
+        const totalSef = allItems.reduce((s, qi) => s + parseFloat(String(qi.sef_tax || 0)), 0);
+        const totalInterest = allItems.reduce((s, qi) => s + parseFloat(String(qi.interest || 0)), 0);
+        const totalDiscount = allItems.reduce((s, qi) => s + parseFloat(String(qi.discount || 0)), 0);
+        const totalAmount = allItems.reduce((s, qi) => s + parseFloat(String(qi.amount || 0)), 0);
+
+        setPaymentForm(prev => ({
+          ...prev,
+          year: rangeLabel,
+          basic_tax: totalBasic.toFixed(2),
+          sef_tax: totalSef.toFixed(2),
+          interest: totalInterest.toFixed(2),
+          discount: totalDiscount.toFixed(2),
+          amount: totalAmount.toFixed(2)
+        }));
+
         // Store the extracted data for real-time recalculation
         setExtractedPdfData(groupedRanges);
         setPaymentQueue(prev => [...prev, ...newItems]);

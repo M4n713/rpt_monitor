@@ -394,7 +394,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           id SERIAL PRIMARY KEY,
           owner_id INTEGER REFERENCES users(id),
           registered_owner_name TEXT,
-          pin TEXT,
+          pin TEXT UNIQUE,
           td_no TEXT,
           lot_no TEXT,
           address TEXT,
@@ -580,15 +580,51 @@ const initDb = async (retries = 1, delay = 1000) => {
         ALTER TABLE users ADD COLUMN IF NOT EXISTS login_level INTEGER DEFAULT 1;
       `).catch(e => console.log('Alter table users login_level failed:', e.message));
 
-      // Alter payments to allow NULL collector_id
+      // Robust column migrations using DO blocks to prevent transaction poisoning
       await dbQuery(`
-        ALTER TABLE payments ALTER COLUMN collector_id DROP NOT NULL;
-      `).catch(e => console.log('Alter table collector_id failed:', e.message));
+        DO $$ 
+        BEGIN 
+          -- Ensure payments columns
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS basic_tax NUMERIC;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS sef_tax NUMERIC;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS interest NUMERIC;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS discount NUMERIC;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS remarks TEXT;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS taxpayer_id INTEGER REFERENCES users(id);
+          ALTER TABLE payments ALTER COLUMN collector_id DROP NOT NULL;
 
-      // Robust Property Migrations
-      await dbQuery('ALTER TABLE properties ADD COLUMN IF NOT EXISTS taxability TEXT').catch(() => {});
-      await dbQuery('ALTER TABLE properties ADD COLUMN IF NOT EXISTS classification TEXT').catch(() => {});
-      await dbQuery('ALTER TABLE properties ADD COLUMN IF NOT EXISTS remarks TEXT').catch(() => {});
+          -- Ensure assessments columns
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS basic_tax NUMERIC;
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS sef_tax NUMERIC;
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS interest NUMERIC;
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS discount NUMERIC;
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS assigned_collector_id INTEGER REFERENCES users(id);
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+
+          -- Ensure properties columns
+          ALTER TABLE properties ADD COLUMN IF NOT EXISTS taxability TEXT;
+          ALTER TABLE properties ADD COLUMN IF NOT EXISTS classification TEXT;
+          ALTER TABLE properties ADD COLUMN IF NOT EXISTS remarks TEXT;
+
+          -- Safe Rename: user_id to taxpayer_id in assessments
+          IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='assessments' AND column_name='user_id') THEN
+            ALTER TABLE assessments RENAME COLUMN user_id TO taxpayer_id;
+          END IF;
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS taxpayer_id INTEGER REFERENCES users(id);
+        EXCEPTION WHEN OTHERS THEN 
+          -- Ignore migration errors but keep transaction alive if possible
+        END $$;
+      `);
+
+      // Ensure properties properties_pin_key UNIQUE (pin)
+      await dbQuery(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'properties_pin_key') THEN
+            ALTER TABLE properties ADD CONSTRAINT properties_pin_key UNIQUE (pin);
+          END IF;
+        EXCEPTION WHEN OTHERS THEN END $$;
+      `);
       await dbQuery('ALTER TABLE properties DROP CONSTRAINT IF EXISTS properties_status_check').catch(() => {});
 
       // Seed Barangays
@@ -1430,21 +1466,26 @@ async function startServer() {
             DROP TABLE IF EXISTS payments CASCADE;
             DROP TABLE IF EXISTS property_owners CASCADE;
             DROP TABLE IF EXISTS properties CASCADE;
-
             CREATE TABLE properties (
               id SERIAL PRIMARY KEY,
+              owner_id INTEGER REFERENCES users(id),
               registered_owner_name TEXT,
-              pin TEXT,
+              pin TEXT UNIQUE,
               td_no TEXT,
               lot_no TEXT,
               address TEXT,
-              description TEXT,
+              kind TEXT,
               assessed_value NUMERIC,
-              tax_due NUMERIC,
+              tax_due NUMERIC DEFAULT 0,
               status TEXT,
+              last_payment_date TIMESTAMPTZ,
               total_area TEXT,
+              ownership_type TEXT,
+              claimed_area TEXT,
               taxability TEXT,
               classification TEXT,
+              old_pin TEXT,
+              effectivity TEXT,
               remarks TEXT
             );
 
@@ -1453,27 +1494,39 @@ async function startServer() {
               property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
               user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
               ownership_type TEXT,
-              claimed_area TEXT
+              claimed_area TEXT,
+              UNIQUE(property_id, user_id)
             );
 
             CREATE TABLE payments (
               id SERIAL PRIMARY KEY,
               property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
-              amount NUMERIC,
+              taxpayer_id INTEGER REFERENCES users(id),
+              amount NUMERIC NOT NULL,
               payment_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
               collector_id INTEGER REFERENCES users(id),
-              taxpayer_id INTEGER REFERENCES users(id),
               or_no TEXT,
-              year TEXT
+              year TEXT,
+              basic_tax NUMERIC,
+              sef_tax NUMERIC,
+              interest NUMERIC,
+              discount NUMERIC,
+              remarks TEXT
             );
 
             CREATE TABLE assessments (
               id SERIAL PRIMARY KEY,
               property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
-              user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-              amount NUMERIC,
+              taxpayer_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+              assigned_collector_id INTEGER REFERENCES users(id),
+              amount NUMERIC NOT NULL,
               year TEXT,
-              status TEXT DEFAULT 'pending'
+              basic_tax NUMERIC,
+              sef_tax NUMERIC,
+              interest NUMERIC,
+              discount NUMERIC,
+              status TEXT DEFAULT 'pending',
+              created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             );
           `);
           
@@ -1826,23 +1879,46 @@ async function startServer() {
   app.post('/api/payment', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'collector' && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     const { property_id, amount, or_no, year, basic_tax, sef_tax, interest, discount, remarks } = req.body;
- 
-    try {
+     try {
+      console.log(`[API PAYMENT] Start. Body:`, JSON.stringify(req.body));
       await dbQuery('BEGIN');
  
       const { rows: propRows } = await dbQuery('SELECT * FROM properties WHERE id = $1', [property_id]);
       const property = propRows[0];
-      if (!property) throw new Error('Property not found');
+      if (!property) {
+        console.error(`[API PAYMENT] Property ${property_id} not found`);
+        throw new Error('Property not found');
+      }
+      console.log(`[API PAYMENT] Found property:`, property.pin, 'Owner:', property.owner_id);
  
+      // Sanitize numeric inputs to prevent comma-related parse errors in Postgres
+      const cleanNum = (val: any) => {
+        if (val === undefined || val === null || val === '') return null;
+        const cleaned = String(val).replace(/,/g, '');
+        const parsed = parseFloat(cleaned);
+        return isNaN(parsed) ? null : parsed;
+      };
+
+      const sanitizedAmount = cleanNum(amount) || 0;
+      const sanitizedBasic = cleanNum(basic_tax);
+      const sanitizedSef = cleanNum(sef_tax);
+      const sanitizedInterest = cleanNum(interest);
+      const sanitizedDiscount = cleanNum(discount);
+
       // Record payment
+      const paymentParams = [property_id, property.owner_id, sanitizedAmount, new Date().toISOString(), req.user.id, or_no, year, sanitizedBasic, sanitizedSef, sanitizedInterest, sanitizedDiscount, remarks];
+      console.log(`[API PAYMENT] Inserting payment. Sanitized Params:`, paymentParams);
+      
       await dbQuery(`
         INSERT INTO payments (property_id, taxpayer_id, amount, payment_date, collector_id, or_no, year, basic_tax, sef_tax, interest, discount, remarks)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-      `, [property_id, property.owner_id, amount, new Date().toISOString(), req.user.id, or_no, year, basic_tax, sef_tax, interest, discount, remarks]);
+      `, paymentParams);
+      console.log(`[API PAYMENT] Payment recorded`);
 
       // TAXPAYER LOGGING: Time Out (Commit)
       const taxpayer_id = property.owner_id;
       if (taxpayer_id) {
+        console.log(`[API PAYMENT] Tracking logging for taxpayer ${taxpayer_id}`);
         // Check for open log for THIS collector
         const { rows: openLogs } = await dbQuery(
           'SELECT id, pins FROM taxpayer_logs WHERE taxpayer_id = $1 AND user_id = $2 AND time_out IS NULL ORDER BY created_at DESC LIMIT 1',
@@ -1850,9 +1926,11 @@ async function startServer() {
         );
 
         if (openLogs.length > 0) {
+          console.log(`[API PAYMENT] Closing open log:`, openLogs[0].id);
           // Close existing log
           await dbQuery('UPDATE taxpayer_logs SET time_out = $1 WHERE id = $2', [new Date().toISOString(), openLogs[0].id]);
         } else {
+          console.log(`[API PAYMENT] No open log found. Creating session log.`);
           // If no open log, create one just to record the transaction (Time In = Time Out)
           const { rows: tpRows } = await dbQuery('SELECT full_name FROM users WHERE id = $1', [taxpayer_id]);
           const taxpayerName = tpRows[0]?.full_name || 'Unknown';
@@ -1867,9 +1945,11 @@ async function startServer() {
  
       // Update property status
       let newStatus = 'partial';
-      if (parseFloat(amount) >= parseFloat(property.tax_due)) {
+      const parsedTaxDue = parseFloat(property.tax_due || '0');
+      if (sanitizedAmount >= parsedTaxDue) {
         newStatus = 'paid';
       }
+      console.log(`[API PAYMENT] Updating status to ${newStatus}. Due: ${parsedTaxDue}, Paid: ${sanitizedAmount}`);
  
       await dbQuery('UPDATE properties SET status = $1, last_payment_date = $2 WHERE id = $3', [newStatus, new Date().toISOString(), property_id]);
  
@@ -1881,7 +1961,11 @@ async function startServer() {
     } catch (err) {
       await dbQuery('ROLLBACK');
       console.error('Payment error:', err);
-      res.status(500).json({ error: 'Payment failed' });
+      res.status(500).json({ 
+        error: 'Payment failed',
+        details: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined
+      });
     }
   });
 
