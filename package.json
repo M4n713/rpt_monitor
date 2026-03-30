@@ -4,10 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build",
-    "preview": "vite preview",
-    "clean": "rm -rf dist",
+    "dev": "cross-env NODE_ENV=development tsx server.ts",
+    "build": "npm run build:frontend && npm run build:server",
+    "build:frontend": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "start": "cross-env NODE_ENV=production node dist-server/server.js",
+    "clean": "rm -rf dist dist-server",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
@@ -49,6 +51,7 @@
     "@types/node": "^22.14.0",
     "@types/pg": "^8.18.0",
     "autoprefixer": "^10.4.21",
+    "cross-env": "^10.1.0",
     "shadcn": "^3.8.5",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
