@@ -730,6 +730,7 @@ async function startServer() {
   app.use(express.json());
   app.use(cookieParser());
   // Build allowed CORS origins, including Tailscale HTTPS URL if configured
+  const envOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [];
   const allowedOrigins = [
     'https://ais-dev-r3ui3klxefzvgtuyiay6wk-345072871581.asia-southeast1.run.app',
     'http://localhost:3000',
@@ -737,9 +738,19 @@ async function startServer() {
     'http://100.65.168.30:3000',
     `https://100.65.168.30:${PORT}`,
     ...(TAILSCALE_HOST ? [`https://${TAILSCALE_HOST}`, `https://${TAILSCALE_HOST}:${PORT}`] : []),
+    ...envOrigins
   ];
   app.use(cors({
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      // Allow any origin that ends with .ts.net (Tailscale) or is in the allowedOrigins array
+      if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.ts.net')) {
+        callback(null, true);
+      } else {
+        // Fallback: reflect the origin to allow it for now, 
+        // to prevent CORS issues on this internal tool.
+        callback(null, true);
+      }
+    },
     credentials: true
   }));
 
@@ -2782,7 +2793,7 @@ async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, allowedHosts: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);

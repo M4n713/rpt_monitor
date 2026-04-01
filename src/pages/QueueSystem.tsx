@@ -60,7 +60,7 @@ const SERVICES: Service[] = [
     id: 'other-inquiries',
     icon: <MessageCircle className="w-5 h-5 text-slate-400" />,
     title: 'Other Tax Inquiries',
-    description: 'Assist with re-assessments, transfers or general RPT concerns not listed above.',
+    description: 'Provide assistance with re-assessments, transfers or other RPT concerns not listed above.',
   },
 ];
 
@@ -1240,7 +1240,7 @@ function NowServingBigScreen() {
                       </span>
                       <div>
                         <div style={{ fontSize: '22px', fontWeight: 800, color: '#fff' }}>{person.full_name}</div>
-                        <div style={{ fontSize: '13px', color: '#94a3b8', fontWeight: 600 }}>{person.transaction_type || 'General Transaction'}</div>
+                        <div style={{ fontSize: '13px', color: '#94a3b8', fontWeight: 600 }}>{person.transaction_type || 'Other Tax Inquiries'}</div>
                       </div>
                     </div>
                     <div style={{ 

@@ -1,0 +1,34 @@
+module.exports = {
+  apps: [
+    {
+      name: 'rpt-monitor',
+      script: './server.ts',
+      interpreter: 'tsx',
+      instances: process.platform === 'win32' ? 1 : 'max',
+      exec_mode: process.platform === 'win32' ? 'fork' : 'cluster',
+      env: {
+        NODE_ENV: 'production',
+        PORT: 3000,
+        HOST: '0.0.0.0',
+      },
+      env_development: {
+        NODE_ENV: 'development',
+        PORT: 3000,
+        HOST: 'localhost',
+      },
+      error_file: './logs/pm2-error.log',
+      out_file: './logs/pm2-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      merge_logs: true,
+      max_memory_restart: '500M',
+      watch: false,
+      ignore_watch: ['node_modules', 'dist', 'logs'],
+      autorestart: true,
+      max_restarts: 5,
+      min_uptime: '10s',
+      listen_timeout: 10000,
+      kill_timeout: 5000,
+      restart_delay: 4000,
+    },
+  ],
+};
