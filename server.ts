@@ -13,6 +13,7 @@ import multer from 'multer';
 import { Readable } from 'stream';
 import csvParser from 'csv-parser';
 import fs from 'fs';
+import https from 'https';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -326,8 +327,17 @@ console.log(`[DB] User: ${poolConfig.user || 'N/A'}`);
 console.log(`[DB] Database: ${poolConfig.database || 'N/A'}`);
 
 // Ensure the server listens on all interfaces
-const PORT = 3000;
-const HOST = '0.0.0.0'; 
+// Use port 443 for HTTPS (requires admin/elevated privileges) or override with PORT env var
+const PORT = parseInt(process.env.PORT || '3000');
+const HOST = '0.0.0.0';
+
+// --- TAILSCALE HTTPS CERT CONFIG ---
+// Run once: tailscale cert <your-machine-name>.ts.net
+// This generates <hostname>.crt and <hostname>.key in the current directory
+// Set TAILSCALE_CERT and TAILSCALE_KEY env vars, or place server.crt / server.key in project root
+const TAILSCALE_CERT = process.env.TAILSCALE_CERT || path.join(__dirname, 'server.crt');
+const TAILSCALE_KEY  = process.env.TAILSCALE_KEY  || path.join(__dirname, 'server.key');
+const TAILSCALE_HOST = process.env.TAILSCALE_HOST || ''; // e.g. your-machine.ts.net
 
 
 
@@ -719,8 +729,17 @@ async function startServer() {
 
   app.use(express.json());
   app.use(cookieParser());
+  // Build allowed CORS origins, including Tailscale HTTPS URL if configured
+  const allowedOrigins = [
+    'https://ais-dev-r3ui3klxefzvgtuyiay6wk-345072871581.asia-southeast1.run.app',
+    'http://localhost:3000',
+    `https://localhost:${PORT}`,
+    'http://100.65.168.30:3000',
+    `https://100.65.168.30:${PORT}`,
+    ...(TAILSCALE_HOST ? [`https://${TAILSCALE_HOST}`, `https://${TAILSCALE_HOST}:${PORT}`] : []),
+  ];
   app.use(cors({
-    origin: ['https://ais-dev-r3ui3klxefzvgtuyiay6wk-345072871581.asia-southeast1.run.app', 'http://localhost:3000', 'http://100.65.168.30:3000'],
+    origin: allowedOrigins,
     credentials: true
   }));
 
@@ -2081,7 +2100,7 @@ async function startServer() {
     if (req.user.username.toLowerCase() !== 'manlie') return res.status(403).json({ error: 'Forbidden: Only Manlie can perform this action' });
     
     const { action, account_id } = req.body;
-    console.log('[DEBUG] Delete Account Request:', { action, account_id, user: req.user, userName: req.user.name, username: req.user.username });
+    console.log('[DEBUG] Reset/Delete Request:', { action, account_id, user: req.user, userId: req.user.id });
 
     try {
       await dbQuery('BEGIN');
@@ -2096,18 +2115,13 @@ async function startServer() {
           return res.status(403).json({ error: 'Cannot delete master admin account' });
         }
 
-        // Handle collector references
+        // Handle references
+        console.log(`[DELETE] Cleaning up references for user ${account_id}`);
         await dbQuery('UPDATE users SET assigned_collector_id = NULL WHERE assigned_collector_id = $1', [account_id]);
         await dbQuery('UPDATE assessments SET assigned_collector_id = NULL WHERE assigned_collector_id = $1', [account_id]);
         await dbQuery('UPDATE payments SET collector_id = NULL WHERE collector_id = $1', [account_id]);
-
-        // Handle admin references
         await dbQuery('DELETE FROM admin_logs WHERE admin_id = $1', [account_id]);
-
-        // Handle direct messages
         await dbQuery('DELETE FROM direct_messages WHERE sender_id = $1 OR recipient_id = $1', [account_id]);
-
-        // Delete associated data
         await dbQuery('DELETE FROM assessments WHERE taxpayer_id = $1', [account_id]);
         await dbQuery('DELETE FROM payments WHERE taxpayer_id = $1', [account_id]);
         await dbQuery('DELETE FROM property_owners WHERE user_id = $1', [account_id]);
@@ -2115,35 +2129,56 @@ async function startServer() {
         await dbQuery('DELETE FROM taxpayer_logs WHERE taxpayer_id = $1 OR user_id = $1', [account_id]);
         
         // Finally delete the user
+        console.log(`[DELETE] Finally deleting user ${account_id}`);
         await dbQuery('DELETE FROM users WHERE id = $1', [account_id]);
 
         await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)',
           ['delete_account', `Deleted user account ID: ${account_id}`, req.user.id, new Date().toISOString()]);
       } else {
-        // Reset all data
+        // --- FACTORY RESET: NUKE EVERYTHING GENTLY ---
+        console.log('[RESET] Initiating full system data reset...');
+        
+        // 1. Break self-references in users to allow deletion
+        await dbQuery('UPDATE users SET assigned_collector_id = NULL');
+        
+        // 2. Clear transactional tables
         await dbQuery('DELETE FROM assessments');
         await dbQuery('DELETE FROM payments');
+        
+        // 3. Clear property/owner tagging
         await dbQuery('DELETE FROM property_owners');
         await dbQuery('DELETE FROM properties');
+        
+        // 4. Clear all logs
         await dbQuery('DELETE FROM taxpayer_logs');
-        await dbQuery('DELETE FROM admin_logs WHERE action_type != $1', ['system_reset']);
+        await dbQuery('DELETE FROM admin_logs'); // Delete ALL logs including system_reset
         await dbQuery('DELETE FROM direct_messages');
         
-        // Keep current admin
+        // 5. Clear other settings/content
+        await dbQuery('DELETE FROM messages');
+        await dbQuery('DELETE FROM inquiries');
+        await dbQuery('DELETE FROM login_patterns');
+        
+        // 6. Delete all users except for the current session user
+        console.log(`[RESET] Deleting all users except ID ${req.user.id}`);
         await dbQuery('DELETE FROM users WHERE id != $1', [req.user.id]);
         
+        // 7. Audit log for the reset action (re-inserts after clearing)
         await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)',
-          ['system_reset', 'Reset all data including users', req.user.id, new Date().toISOString()]);
+          ['system_reset', 'System-wide factory reset performed', req.user.id, new Date().toISOString()]);
+          
+        console.log('[RESET] Factory reset completed successfully');
       }
  
       await dbQuery('COMMIT');
       res.json({ success: true });
-    } catch (err) {
+    } catch (err: any) {
       await dbQuery('ROLLBACK');
-      console.error('Reset data error:', err);
-      res.status(500).json({ error: 'Failed to perform action' });
+      console.error('Reset/Delete data error:', err);
+      res.status(500).json({ error: 'Failed to perform action', details: err.message });
     }
   });
+
 
   app.get('/api/admin/logs', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
@@ -2759,13 +2794,34 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, HOST, () => {
-    console.log(`[Server] Running on http://${HOST}:${PORT}`);
-    console.log(`[DB] Using Host: ${poolConfig.host || 'localhost'}`);
-    console.log(`[DB] Using Port: ${poolConfig.port || '5433'}`);
-    console.log(`[DB] Using SSL: ${process.env.DB_SSL === 'true'}`);
-    console.log(`[DB] Note: Ensure your database allows connections from the cloud environment.`);
-  });
+  // --- HTTPS via Tailscale ---
+  let useTLS = false;
+  try {
+    const certFile = fs.readFileSync(TAILSCALE_CERT);
+    const keyFile  = fs.readFileSync(TAILSCALE_KEY);
+    const httpsServer = https.createServer({ cert: certFile, key: keyFile }, app);
+    httpsServer.listen(PORT, HOST, () => {
+      console.log(`[Server] Running on https://${HOST}:${PORT} (TLS enabled via Tailscale cert)`);
+      if (TAILSCALE_HOST) console.log(`[Server] Accessible at https://${TAILSCALE_HOST}:${PORT}`);
+      console.log(`[DB] Using Host: ${poolConfig.host || 'localhost'}`);
+      console.log(`[DB] Using Port: ${poolConfig.port || '5433'}`);
+      console.log(`[DB] Using SSL: ${process.env.DB_SSL === 'true'}`);
+    });
+    useTLS = true;
+  } catch (tlsErr: any) {
+    console.warn(`[Server] Could not load TLS cert/key: ${tlsErr.message}`);
+    console.warn(`[Server] Falling back to plain HTTP. To enable HTTPS run: tailscale cert <hostname>`);  
+    // Fallback to plain HTTP
+    app.listen(PORT, HOST, () => {
+      console.log(`[Server] Running on http://${HOST}:${PORT} (no TLS — cert not found)`);
+      console.log(`[DB] Using Host: ${poolConfig.host || 'localhost'}`);
+      console.log(`[DB] Using Port: ${poolConfig.port || '5433'}`);
+      console.log(`[DB] Using SSL: ${process.env.DB_SSL === 'true'}`);
+    });
+  }
+  if (!useTLS) {
+    console.log('[Server] TIP: Set TAILSCALE_CERT, TAILSCALE_KEY, and TAILSCALE_HOST env vars to enable HTTPS.');
+  }
 }
 
 initDb().then(startServer);

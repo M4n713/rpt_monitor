@@ -1,0 +1,56 @@
+[
+  {
+    "username": "Rhea",
+    "role": "admin",
+    "full_name": "Renevil D. Cajayon",
+    "id": 33
+  },
+  {
+    "username": "cielito",
+    "role": "taxpayer",
+    "full_name": "Cielito B. Dapito",
+    "id": 36
+  },
+  {
+    "username": "alex",
+    "role": "taxpayer",
+    "full_name": "Alex V. Aranda",
+    "id": 43
+  },
+  {
+    "username": "jerome",
+    "role": "taxpayer",
+    "full_name": "Jerome E. Sagana",
+    "id": 47
+  },
+  {
+    "username": "mx",
+    "role": "taxpayer",
+    "full_name": "Mx A. sd",
+    "id": 48
+  },
+  {
+    "username": "Manlie",
+    "role": "admin",
+    "full_name": "Manlie (Admin/Collector)",
+    "id": 4
+  },
+  {
+    "username": "treas",
+    "role": "queue",
+    "full_name": "Treasurer Queue Kiosk",
+    "id": 39
+  },
+  {
+    "username": "manlie",
+    "role": "admin",
+    "full_name": "Manlie (Admin/Collector)",
+    "id": 41
+  },
+  {
+    "username": "melchor",
+    "role": "taxpayer",
+    "full_name": "Melchor L. Quiatchon",
+    "id": 38
+  }
+]
