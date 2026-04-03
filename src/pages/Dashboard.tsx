@@ -582,7 +582,7 @@ export default function Dashboard({ taxpayerId, taxpayerName }: { taxpayerId?: n
                       onClick={() => {
                         const formatted = formatPinSearch(erptaasPin);
                         setErptaasPin(formatted);
-                        setErptaasUrl(`https://www.ompassessor.com.ph/etax/redirectpage/viewdetails.php?mode=2&pinno=${formatted}&muncode=09`);
+                        setErptaasUrl(`https://www.ompassessor.com.ph/etax/redirectpage/esearchproperty.php?iSearchTxt=${formatted}&iMode=2&iMunicipality=09&iGoSearch=Search`);
                       }}
                       className="bg-blue-600 hover:bg-blue-700"
                     >
@@ -591,26 +591,13 @@ export default function Dashboard({ taxpayerId, taxpayerName }: { taxpayerId?: n
                   </div>
                 </div>
 
-                <div className="flex-1 w-full border rounded-xl overflow-hidden bg-white relative">
+                <div className="flex-1 w-full border rounded-xl overflow-hidden bg-white min-h-[600px] relative bg-gray-50/30">
                   {erptaasUrl ? (
-                    <div className="w-full h-full flex flex-col overflow-hidden bg-white">
-                      {/* Search Result Summary (Top) */}
-                      <div className="h-[100px] border-b overflow-hidden relative bg-gray-50/30">
-                        <iframe
-                          src={erptaasUrl.replace('viewdetails.php', 'esearchproperty.php').replace('pinno=', 'iSearchTxt=') + '&iMode=2&iMunicipality=09&iGoSearch=Search'}
-                          className="w-[200%] h-[200%] border-none -mt-[110px] -ml-[284px]"
-                          title="eRPTAAS Search Result"
-                        />
-                      </div>
-                      {/* Property Details (Bottom) - The detailed view */}
-                      <div className="flex-1 overflow-hidden relative">
-                        <iframe
-                          src={erptaasUrl}
-                          className="w-[150%] h-[200%] border-none -mt-[50px] -ml-[105px]"
-                          title="eRPTAAS Property Details"
-                        />
-                      </div>
-                    </div>
+                    <iframe
+                      src={erptaasUrl}
+                      className="w-[200%] h-[200%] border-none -mt-[80px] -ml-[284px]"
+                      title="eRPTAAS Portal"
+                    />
                   ) : (
                     <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-12 bg-gray-50">
                       <Globe className="w-16 h-16 text-gray-300 mb-4" />

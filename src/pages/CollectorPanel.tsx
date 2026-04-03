@@ -665,59 +665,156 @@ export default function CollectorPanel() {
 
     setIsPdfProcessing(true);
     try {
-      // Set worker
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+      // Set worker to local file
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
       const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+      const pdf = await loadingTask.promise;
       let fullText = "";
 
       for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => item.str).join(" ");
-        fullText += pageText + "\n";
+        try {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map((item: any) => (item as any).str || '').join(" ");
+          fullText += pageText + "\n";
+        } catch (pageErr) {
+          console.warn(`Warning: Failed to extract text from page ${i}:`, pageErr);
+        }
       }
 
-      // Regex to find year ranges and values
-      const regex = /(\d{4}(?:-\d{4})?)\s+.*?(\d{1,3}(?:,\d{3})*(?:\.\d{2}))/g;
-      const extractedData = [];
-      let match;
-      while ((match = regex.exec(fullText)) !== null) {
-        extractedData.push({
-          year: match[1],
-          assessed_value: parseFloat(match[2].replace(/,/g, ''))
-        });
+      if (!fullText || fullText.trim().length === 0) {
+        alert("PDF file is empty or contains no readable text. Please ensure it's a valid document with text content.");
+        return;
       }
 
       const prop = properties.find(p => p.id.toString() === selectedPropertyId);
-      if (!prop) return;
+      if (!prop) {
+        alert("Selected property not found.");
+        return;
+      }
+
+      // Extract and verify PIN from PDF
+      const pinRegex = /028[-.]09[-.](\d{4})[-.](\d{3})[-.](?:\()?(\d{2})(?:\))?(?:[-.](\d{4}))?/g;
+      let extractedPin: string | null = null;
+      let pinMatch;
+
+      while ((pinMatch = pinRegex.exec(fullText)) !== null) {
+        const part2 = pinMatch[1];
+        const part3 = pinMatch[2];
+        const part4 = pinMatch[3];
+        const part5 = pinMatch[4];
+        const matchedText = pinMatch[0];
+        const separator = matchedText.includes('.') ? '.' : '-';
+
+        if (part5) {
+          extractedPin = `028${separator}09${separator}${part2}${separator}${part3}${separator}${part4}${separator}${part5}`;
+        } else {
+          extractedPin = `028${separator}09${separator}${part2}${separator}${part3}${separator}${part4}`;
+        }
+        break;
+      }
+
+      if (extractedPin) {
+        const normalizedExtracted = extractedPin.replace(/\./g, '-').toUpperCase();
+        const normalizedProperty = prop.pin.replace(/\./g, '-').toUpperCase();
+        if (normalizedExtracted !== normalizedProperty) {
+          alert(`PIN Mismatch!\nPDF PIN: ${extractedPin}\nProperty PIN: ${prop.pin}\n\nPlease ensure you uploading the correct document for this property.`);
+          return;
+        }
+      } else {
+        alert("Warning: Could not find PIN in PDF. Proceeding with extraction.\nPlease manually verify this is the correct property document.");
+      }      // Block-Based Parsing: Split text by TD# occurrences to isolated row contexts
+      // This prevents capturing totals or intermediate values from other columns
+      const rowBlocks = fullText.split(/(?=\b[\d\-]{3,16}[A-Z]?\b|\bTOTAL\b)/i);
+      const yearEntries: Array<{ year: number; assessed_value: number; td_no?: string }> = [];
+      const normalizedPropPin = prop.pin.replace(/\./g, '-').toUpperCase();
+
+      let mMatch;
+      while ((mMatch = moneyRegex.exec(fullText)) !== null) {
+        const valStr = mMatch[1];
+        const value = parseFloat(valStr.replace(/,/g, ''));
+        
+        if (value < 500) continue; 
+
+        // Scan context window around the monetary anchor
+        const start = Math.max(0, mMatch.index - 120);
+        const end = Math.min(fullText.length, mMatch.index + 120);
+        const window = fullText.substring(start, end);
+
+        // 1. Find Years (1[9]... or 2[0]...)
+        const yearsFound = window.match(/\b(1[9]\d{2}|2[0]\d{2})\b/g) || [];
+        if (yearsFound.length === 0) continue;
+
+        // 2. Find TD# (Exclude PIN)
+        const tdMatches = window.match(/\b(\d{2,4}-\d{3,}[\d\-A-Z]*)\b/g) || [];
+        const tdStr = tdMatches.find(t => t.toUpperCase() !== normalizedPropPin) || (tdMatches.length > 0 ? tdMatches[0] : '');
+        if (!tdStr) continue;
+
+        // 3. Handle Year or Range
+        const hasDash = /[\-–]/.test(window);
+        const yParts = Array.from(new Set(yearsFound)).map(y => parseInt(y)).sort((a, b) => a - b);
+        
+        const addEntry = (y: number) => {
+          const key = `${y}-${tdStr.toUpperCase()}-${value.toFixed(2)}`;
+          if (!uniqueEntryKeys.has(key)) {
+            uniqueEntryKeys.add(key);
+            yearEntries.push({ year: y, assessed_value: value, td_no: tdStr });
+          }
+        };
+
+        if (yParts.length >= 2 && hasDash) {
+          const startY = yParts[0];
+          const endY = yParts[yParts.length - 1];
+          for (let y = startY; y <= endY; y++) {
+            addEntry(y);
+          }
+        } else {
+          yParts.forEach(y => addEntry(y));
+        }
+      }
+
+      if (yearEntries.length === 0) {
+        alert("No valid entries found in the PDF.\n\nTroubleshooting:\n• Expected format: TD# followed by Assessed Value and Year.\n• Example: 001-0017-A 12,460.00 2003");
+        return;
+      }
+
+      yearEntries.sort((a, b) => a.year - b.year);
+
+      const groupedRanges: Array<{ startYear: number; endYear: number; assessed_value: number; td_no?: string }> = [];
+      let currentStart = yearEntries[0].year;
+      let currentAV = yearEntries[0].assessed_value;
+      let currentTD = yearEntries[0].td_no;
+
+      for (let i = 1; i <= yearEntries.length; i++) {
+        const nextEntry = yearEntries[i];
+        if (i === yearEntries.length || nextEntry.assessed_value !== currentAV || nextEntry.td_no !== currentTD || nextEntry.year !== yearEntries[i - 1].year + 1) {
+          const endYear = yearEntries[i - 1].year;
+          groupedRanges.push({
+            startYear: currentStart,
+            endYear: endYear,
+            assessed_value: currentAV,
+            td_no: currentTD
+          });
+          if (i < yearEntries.length) {
+            currentStart = nextEntry.year;
+            currentAV = nextEntry.assessed_value;
+            currentTD = nextEntry.td_no;
+          }
+        }
+      }
 
       const generatedItems: any[] = [];
-      for (const item of extractedData) {
-        let startYear: number;
-        let endYear: number;
-
-        const yearStr = String(item.year);
-        if (yearStr.includes('-')) {
-          const parts = yearStr.split('-');
-          startYear = parseInt(parts[0]);
-          endYear = parseInt(parts[1]);
-        } else {
-          startYear = parseInt(yearStr);
-          endYear = startYear;
-        }
-
-        if (isNaN(startYear) || isNaN(endYear)) continue;
-
-        const result = calculateTaxForRange(startYear, endYear, prop, paymentForm.computationType, item.assessed_value);
-
+      for (const range of groupedRanges) {
+        const result = calculateTaxForRange(range.startYear, range.endYear, prop, paymentForm.computationType, range.assessed_value);
         generatedItems.push({
           property_id: parseInt(selectedPropertyId),
           pin: prop.pin,
-          year: yearStr,
-          yearCount: endYear - startYear + 1,
-          assessed_value: item.assessed_value,
+          td_no: range.td_no,
+          year: range.startYear === range.endYear ? range.startYear.toString() : `${range.startYear}-${range.endYear}`,
+          yearCount: range.endYear - range.startYear + 1,
+          assessed_value: range.assessed_value,
           ...result,
           or_no: paymentForm.or_no,
           computationType: paymentForm.computationType,
@@ -1459,7 +1556,8 @@ export default function CollectorPanel() {
         computationType: 'standard',
         or_no: orNo,
         assessment_id: assessment.id,
-        remarks: ''
+        remarks: '',
+        td_no: assessment.td_no
       };
 
       const received = window.confirm("Tax Payment Received?");
@@ -1689,6 +1787,7 @@ export default function CollectorPanel() {
                                     <table className="w-full text-sm text-left">
                                       <thead className="bg-indigo-50/50 border-b border-indigo-100">
                                         <tr>
+                                          <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider align-bottom">TD#</th>
                                           <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider align-bottom">Years Covered</th>
                                           <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-center align-bottom">No. of Years</th>
                                           <th className="px-4 py-3 text-xs font-semibold text-indigo-900 uppercase tracking-wider text-right align-bottom">Assessed Value</th>
@@ -1701,6 +1800,7 @@ export default function CollectorPanel() {
                                       </thead>
                                       <tbody className="divide-y divide-indigo-50">
                                         <tr>
+                                          <td className="px-4 py-3 text-gray-900 font-bold whitespace-nowrap">{assessment.td_no || assessment.property_td_no || '-'}</td>
                                           <td className="px-4 py-3 text-gray-600 font-medium">{assessment.year}</td>
                                           <td className="px-4 py-3 text-gray-600 text-center">
                                             {assessment.year.includes('-')
@@ -2383,7 +2483,7 @@ export default function CollectorPanel() {
       {rptarSearchResults.length > 0 && (
         <Card className="border-none shadow-sm overflow-hidden">
           <CardHeader className="bg-gray-50 border-b border-gray-200">
-            <CardTitle className="text-lg font-bold text-gray-900">Search Results</CardTitle>
+            <CardTitle className="text-lg font-bold text-gray-900">Search Result{rptarSearchResults.length > 1 ? 's' : ''}</CardTitle>
           </CardHeader>
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
@@ -2394,7 +2494,7 @@ export default function CollectorPanel() {
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">PIN</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Lot No.</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right whitespace-nowrap">Area</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-left whitespace-nowrap">Action</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-center whitespace-nowrap">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
@@ -2418,15 +2518,14 @@ export default function CollectorPanel() {
                     <td className="px-6 py-4 font-mono text-sm text-gray-600 whitespace-nowrap">{prop.pin}</td>
                     <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.lot_no}</td>
                     <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">{prop.total_area || '-'}</td>
-                    <td className="px-6 py-4 text-left align-middle leading-none">
+                    <td className="px-6 py-4 text-center align-middle leading-none">
                       <Button
                         size="sm"
                         variant={rptarSelectedPropertyId === prop.id ? "default" : "outline"}
                         onClick={() => setRptarSelectedPropertyId(prop.id === rptarSelectedPropertyId ? null : prop.id)}
                         className="h-8 text-xs gap-2"
                       >
-                        <History className="w-3 h-3" />
-                        {rptarSelectedPropertyId === prop.id ? 'Hide History' : 'Account History'}
+                        {rptarSelectedPropertyId === prop.id ? 'Hide' : 'Account History'}
                       </Button>
                     </td>
                   </tr>
@@ -2448,12 +2547,6 @@ export default function CollectorPanel() {
             </div>
           </CardHeader>
           <CardContent className="pt-0 overflow-x-auto">
-            {rptarPayments.length === 0 ? (
-              <div className="text-center py-12">
-                <CreditCard className="w-12 h-12 text-gray-200 mx-auto mb-3" />
-                <p className="text-sm text-gray-400">No payment records found for this property.</p>
-              </div>
-            ) : (
               <table className="w-full text-xs text-left">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   {/* Main header row */}
@@ -2485,8 +2578,21 @@ export default function CollectorPanel() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {rptarPayments.map(payment => {
+                  {(() => {
                     const prop = rptarSearchResults.find(p => p.id === rptarSelectedPropertyId);
+                    const displayPayments = rptarPayments.length > 0 ? rptarPayments : (prop ? [{
+                      id: 'synthetic-unpaid',
+                      year: new Date().getFullYear().toString(),
+                      assessed_value: prop.total_assessed_value || prop.assessed_value || 0,
+                      basic_tax: 0,
+                      sef_tax: 0,
+                      interest: 0,
+                      discount: 0,
+                      record_type: 'assessment',
+                      remarks: 'UNPAID'
+                    }] : []);
+                    
+                    return displayPayments.map(payment => {
                     
                     // Calculate number of years from year field (can be "1983" or "1983-1985")
                     let numberOfYears = 1;
@@ -2499,10 +2605,11 @@ export default function CollectorPanel() {
                       }
                     }
                     
-                    // Calculate collectibles: 1% of assessed value × number of years
+                    // Calculate collectibles: 1% of assessed value × number of years (0 if retired)
+                    const isRetired = prop?.status?.toLowerCase().includes('retired') || false;
                     const assessedVal = payment.assessed_value ? parseFloat(String(payment.assessed_value)) : 0;
-                    const collectiblesBasic = (assessedVal * 0.01) * numberOfYears;
-                    const collectiblesSef = (assessedVal * 0.01) * numberOfYears;
+                    const collectiblesBasic = isRetired ? 0 : (assessedVal * 0.01) * numberOfYears;
+                    const collectiblesSef = isRetired ? 0 : (assessedVal * 0.01) * numberOfYears;
                     const collectiblesTotal = collectiblesBasic + collectiblesSef;
                     
                     // Collected data comes from actual payments (RPT abstract)
@@ -2512,7 +2619,7 @@ export default function CollectorPanel() {
                     const balanceSef = collectiblesSef - collectedSef;
                     return (
                       <tr key={payment.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-3 py-3 font-medium text-gray-900 text-xs border-r border-gray-100">{prop?.td_no || '-'}</td>
+                        <td className="px-3 py-3 font-medium text-gray-900 text-xs border-r border-gray-100">{payment.td_no || prop?.td_no || '-'}</td>
                         <td className="px-3 py-3 text-gray-600 text-xs border-r border-gray-100">{payment.year || '-'}</td>
                         <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">
                           {payment.assessed_value ? parseFloat(String(payment.assessed_value)).toLocaleString(undefined, { minimumFractionDigits: 2 }) : '---'}
@@ -2535,10 +2642,10 @@ export default function CollectorPanel() {
                         <td className="px-3 py-3 text-gray-500 text-xs italic">{payment.remarks || '-'}</td>
                       </tr>
                     );
-                  })}
+                  });
+                  })()}
                 </tbody>
               </table>
-            )}
           </CardContent>
         </Card>
       )}
@@ -2588,26 +2695,13 @@ export default function CollectorPanel() {
             </div>
           </div>
 
-          <div className="flex-1 w-full border rounded-xl overflow-hidden bg-white relative">
+          <div className="flex-1 w-full border rounded-xl overflow-hidden bg-white min-h-[600px] relative bg-gray-50/30">
             {erptaasUrl ? (
-              <div className="w-full h-full flex flex-col overflow-hidden bg-white">
-                {/* Search Result Summary (Top) */}
-                <div className="h-[100px] border-b overflow-hidden relative bg-gray-50/30">
-                  <iframe
-                    src={erptaasUrl.replace('viewdetails.php', 'esearchproperty.php').replace('pinno=', 'iSearchTxt=') + '&iMode=2&iMunicipality=09&iGoSearch=Search'}
-                    className="w-[200%] h-[200%] border-none -mt-[110px] -ml-[284px]"
-                    title="eRPTAAS Search Result"
-                  />
-                </div>
-                {/* Property Details (Bottom) - The detailed view */}
-                <div className="flex-1 overflow-hidden relative">
-                  <iframe
-                    src={erptaasUrl}
-                    className="w-[150%] h-[200%] border-none -mt-[146px] -ml-[105px]"
-                    title="eRPTAAS Property Details"
-                  />
-                </div>
-              </div>
+              <iframe
+                src={erptaasUrl}
+                className="w-[200%] h-[200%] border-none -mt-[80px] -ml-[284px]"
+                title="eRPTAAS Portal"
+              />
             ) : (
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-12 bg-gray-50">
                 <Globe className="w-16 h-16 text-gray-300 mb-4" />

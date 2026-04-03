@@ -1,4 +1,4 @@
-﻿# ==============================================================
+# ==============================================================
 # RPT Monitor - Install & Start Nginx (Windows)
 # Downloads portable nginx if not present, applies config, starts it
 # ==============================================================
@@ -132,7 +132,8 @@ if ($port80) {
     $rows = @($port80)
     $parts = $rows[0].ToString() -split '\s+'
     $pidNum = $parts | Where-Object { $_ -match '^\d+$' } | Select-Object -Last 1
-    $procName = if ($pidNum) { (Get-Process -Id ([int]$pidNum) -ErrorAction SilentlyContinue)?.ProcessName } else { "?" }
+    if ($pidNum) { $proc = Get-Process -Id ([int]$pidNum) -ErrorAction SilentlyContinue } else { $proc = $null }
+    if ($proc) { $procName = $proc.ProcessName } else { $procName = "?" }
     Write-Host "  ! Port 80 is in use by PID $pidNum ($procName)" -ForegroundColor Red
     Write-Host "    Run: taskkill /PID $pidNum /F    to free port 80, then re-run this script" -ForegroundColor DarkGray
     exit 1

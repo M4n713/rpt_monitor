@@ -2798,77 +2798,47 @@ export default function AdminPanel() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {paymentQueue.map((item, idx) => (
                     <tr key={idx} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-4 py-4 text-gray-600 font-medium">{item.year}</td>
-                      <td className="px-4 py-4 text-gray-600 text-center">{item.yearCount || 1}</td>
-                      <td className="px-4 py-4 text-right font-mono text-gray-600">
+                      <td className="px-4 py-4 text-gray-600 font-medium align-top">{item.year}</td>
+                      <td className="px-4 py-4 text-gray-600 text-center align-top">{item.yearCount || 1}</td>
+                      <td className="px-4 py-4 text-right font-mono text-gray-600 align-top">
                         {(() => {
                           const startYear = parseInt(String(item.year).split('-')[0].trim());
                           const isEditable = startYear <= 2015;
                           return isEditable ? (
-                            <span className="inline-flex items-center justify-end w-full">
-                              <span className="invisible">(</span>
-                              <FormattedCurrencyInput
-                                className="w-32 text-right ml-auto h-8 bg-white border-blue-200 no-spinner font-mono text-gray-900"
-                                value={item.assessed_value}
-                                onChange={(val) => handleQueueAssessmentChange(idx, val)}
-                              />
-                              <span className="invisible">)</span>
-                            </span>
+                            <FormattedCurrencyInput
+                              className="w-32 text-right ml-auto h-8 bg-white border-blue-200 no-spinner font-mono text-gray-900"
+                              value={item.assessed_value}
+                              onChange={(val) => handleQueueAssessmentChange(idx, val)}
+                            />
                           ) : (
-                            <span className="inline-flex items-center justify-end w-full">
-                              <span className="invisible">(</span>
-                              {parseFloat(String(item.assessed_value || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                              <span className="invisible">)</span>
-                            </span>
+                            <span>{parseFloat(String(item.assessed_value || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
                           );
                         })()}
                       </td>
-                      <td className="px-4 py-4 text-right font-mono text-gray-600">
-                        <span className="inline-flex items-center justify-end w-full">
-                          <span className="invisible">(</span>
-                          {parseFloat(String(item.basic_tax || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          <span className="invisible">)</span>
-                        </span>
+                      <td className="px-4 py-4 text-right font-mono text-gray-600 align-top">
+                        {parseFloat(String(item.basic_tax || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                       </td>
-                      <td className="px-4 py-4 text-right font-mono text-gray-600">
-                        <span className="inline-flex items-center justify-end w-full">
-                          <span className="invisible">(</span>
-                          {parseFloat(String(item.sef_tax || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          <span className="invisible">)</span>
-                        </span>
+                      <td className="px-4 py-4 text-right font-mono text-gray-600 align-top">
+                        {parseFloat(String(item.sef_tax || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                       </td>
-                      <td className="px-4 py-4 text-right font-mono text-gray-600">
-                        <span className="inline-flex items-center justify-end w-full">
-                          <span className="invisible">(</span>
-                          {parseFloat(String(item.interest || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          <span className="invisible">)</span>
-                        </span>
+                      <td className="px-4 py-4 text-right font-mono text-gray-600 align-top">
+                        {parseFloat(String(item.interest || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                       </td>
-                      <td className="px-4 py-4 text-right font-mono text-gray-600">
-                        <span className="inline-flex items-center justify-end w-full">
-                          {parseFloat(String(item.discount || '0')) > 0 ? (
-                            <>
-                              <span>(</span>
-                              {parseFloat(String(item.discount || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                              <span>)</span>
-                            </>
-                          ) : (
-                            <>
-                              <span className="invisible">(</span>
-                              {'0.00'}
-                              <span className="invisible">)</span>
-                            </>
-                          )}
-                        </span>
+                      <td className="px-4 py-4 text-right font-mono text-gray-600 align-top">
+                        {parseFloat(String(item.discount || '0')) > 0 ? (
+                          <>
+                            <span>(</span>
+                            {parseFloat(String(item.discount || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            <span>)</span>
+                          </>
+                        ) : (
+                          <span>0.00</span>
+                        )}
                       </td>
-                      <td className="px-4 py-4 text-right font-bold font-mono text-gray-900">
-                        <span className="inline-flex items-center justify-end w-full">
-                          <span className="invisible">(</span>
-                          {parseFloat(String(item.amount || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          <span className="invisible">)</span>
-                        </span>
+                      <td className="px-4 py-4 text-right font-bold font-mono text-gray-900 align-top">
+                        {parseFloat(String(item.amount || '0')).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                       </td>
-                      <td className="px-4 py-4 text-center">
+                      <td className="px-4 py-4 text-center align-top">
                         <button onClick={() => removeFromQueue(idx)} className="text-gray-500 hover:text-gray-900 font-medium text-xs uppercase tracking-wide transition-colors">
                           Remove
                         </button>
@@ -2880,11 +2850,7 @@ export default function AdminPanel() {
                   <tr>
                     <td colSpan={7} className="px-4 py-4 text-right font-bold text-gray-900 uppercase tracking-wide text-xs">Grand Total</td>
                     <td className="px-4 py-4 text-right font-bold text-xl font-mono text-gray-900">
-                      <span className="inline-flex items-center justify-end w-full">
-                        <span className="invisible">(</span>
-                        {grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        <span className="invisible">)</span>
-                      </span>
+                      {grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                     </td>
                     <td></td>
                   </tr>
@@ -3013,26 +2979,13 @@ export default function AdminPanel() {
             </div>
           </div>
 
-          <div className="flex-1 w-full border rounded-xl overflow-hidden bg-white relative">
+          <div className="flex-1 w-full border rounded-xl overflow-hidden bg-white min-h-[600px] relative bg-gray-50/30">
             {erptaasUrl ? (
-              <div className="w-full h-full flex flex-col overflow-hidden bg-white">
-                {/* Search Result Summary (Top) */}
-                <div className="h-[100px] border-b overflow-hidden relative bg-gray-50/30">
-                  <iframe
-                    src={erptaasUrl.replace('viewdetails.php', 'esearchproperty.php').replace('pinno=', 'iSearchTxt=') + '&iMode=2&iMunicipality=09&iGoSearch=Search'}
-                    className="w-[200%] h-[200%] border-none -mt-[110px] -ml-[284px]"
-                    title="eRPTAAS Search Result"
-                  />
-                </div>
-                {/* Property Details (Bottom) - The detailed view */}
-                <div className="flex-1 overflow-hidden relative">
-                  <iframe
-                    src={erptaasUrl}
-                    className="w-[150%] h-[200%] border-none -mt-[50px] -ml-[105px]"
-                    title="eRPTAAS Property Details"
-                  />
-                </div>
-              </div>
+              <iframe
+                src={erptaasUrl}
+                className="w-[200%] h-[200%] border-none -mt-[80px] -ml-[284px]"
+                title="eRPTAAS Portal"
+              />
             ) : (
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-12 bg-gray-50">
                 <Globe className="w-16 h-16 text-gray-300 mb-4" />
@@ -3500,7 +3453,7 @@ export default function AdminPanel() {
       {rptarSearchResults.length > 0 && (
         <Card className="border-none shadow-sm overflow-hidden">
           <CardHeader className="bg-gray-50 border-b border-gray-200">
-            <CardTitle className="text-lg font-bold text-gray-900">Search Results</CardTitle>
+            <CardTitle className="text-lg font-bold text-gray-900">Search Result{rptarSearchResults.length > 1 ? 's' : ''}</CardTitle>
           </CardHeader>
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
@@ -3513,87 +3466,86 @@ export default function AdminPanel() {
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-bottom">Old PIN</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-bottom">Lot No.</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right whitespace-nowrap align-bottom">Area</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-left whitespace-nowrap align-bottom">Action</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-center whitespace-nowrap align-bottom">Action</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100 bg-white">
+              <tbody className="bg-white">
                 {rptarSearchResults
                   .filter(p => !rptarSelectedPropertyId || p.id === rptarSelectedPropertyId)
                   .map((prop) => (
-                    <tr
-                      key={prop.id}
-                      className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
-                    >
-                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left align-middle leading-tight">
-                        <div className="flex flex-col gap-1 items-start">
-                          <span>{prop.kind || prop.description || '-'}</span>
-                          {prop.classification && (
-                            <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200 w-fit">
-                              {prop.classification}
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left align-middle leading-tight">
-                        <div className="flex flex-col gap-2 items-start">
-                          <span className="break-words">{prop.registered_owner_name}</span>
-                          <div className="flex items-center gap-x-1.5 gap-y-1.5 flex-wrap mt-1">
-                            {/* Status Badge */}
-                            {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
-                              <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border align-middle leading-none h-[20px] flex items-center ${(prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
-                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                                : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
-                                  ? 'bg-red-50 text-red-700 border-red-200'
-                                  : 'bg-blue-50 text-blue-700 border-blue-200'
-                                }`}>
-                                {prop.status}
-                              </span>
-                            )}
-                            {prop.taxability && (
-                              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200 align-middle leading-none h-[20px] flex items-center">
-                                {prop.taxability}
-                              </span>
-                            )}
-                            {prop.remarks && (
-                              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200 align-middle leading-none h-[20px] flex items-center">
-                                {prop.remarks}
+                    <React.Fragment key={prop.id}>
+                      <tr
+                        className={`transition-colors border-t border-gray-100 ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50/50' : 'hover:bg-gray-50/50'}`}
+                      >
+                        <td className="px-6 py-3 text-sm font-medium text-gray-700 whitespace-nowrap align-top">
+                          <div className="flex flex-col items-start gap-1">
+                            <span>{prop.kind || prop.description || '-'}</span>
+                            {prop.classification && (
+                              <span className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+                                {prop.classification}
                               </span>
                             )}
                           </div>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left align-middle leading-tight">
-                        {prop.linked_taxpayer ? (
-                          <div className="flex flex-col gap-1 items-start">
+                        </td>
+                        <td className="px-6 py-3 text-sm font-normal text-gray-700 whitespace-normal break-words align-top max-w-[300px]">
+                          <div className="flex flex-col items-start gap-1">
+                            <span>{prop.registered_owner_name}</span>
+                            {(prop.status && !prop.status.toLowerCase().includes('unpaid') || prop.taxability || prop.remarks) && (
+                              <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                                {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
+                                  <span className={`shrink-0 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${
+                                    (prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
+                                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                      : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
+                                        ? 'bg-red-50 text-red-700 border-red-200'
+                                        : 'bg-blue-50 text-blue-700 border-blue-200'
+                                  }`}>
+                                    {prop.status}
+                                  </span>
+                                )}
+                                {prop.taxability && (
+                                  <span className="shrink-0 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                    {prop.taxability}
+                                  </span>
+                                )}
+                                {prop.remarks && (
+                                  <span className="shrink-0 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
+                                    {prop.remarks}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-6 py-3 text-sm font-normal text-gray-700 whitespace-normal break-words align-top max-w-[250px]">
+                          {prop.linked_taxpayer ? (
                             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
                               {prop.linked_taxpayer}
                               <button
                                 onClick={(e) => handleUnlinkSingle(e, prop.id, true)}
                                 className="ml-1 p-0.5 hover:bg-green-200 rounded-full text-green-800 transition-colors"
-                                title="Unlink property"
                               >
                                 <X className="w-3 h-3" />
                               </button>
                             </span>
-                          </div>
-                        ) : (
-                          <span className="text-gray-600 text-sm">Not Tagged</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 font-mono text-sm text-gray-600 text-left whitespace-nowrap align-middle leading-tight">{prop.pin}</td>
-                      <td className="px-6 py-4 font-mono text-sm text-gray-600 text-left whitespace-nowrap align-middle leading-tight">{prop.old_pin || '-'}</td>
-                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left whitespace-nowrap align-middle leading-tight">{prop.lot_no}</td>
-                      <td className="px-6 py-4 font-mono text-sm text-gray-600 text-right whitespace-nowrap align-middle leading-tight">{prop.total_area || '-'}</td>
-                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left whitespace-nowrap align-middle leading-none">
-                        <button
-                          onClick={() => setRptarSelectedPropertyId(prop.id === rptarSelectedPropertyId ? null : prop.id)}
-                          className="text-sm font-normal text-gray-600 hover:text-gray-900 bg-transparent border border-gray-300 px-3 py-1 rounded h-8 w-fit hover:bg-gray-50 inline-flex items-center justify-center gap-2"
-                        >
-                          <History className="w-4 h-4" />
-                          {rptarSelectedPropertyId === prop.id ? 'Hide History' : 'Account History'}
-                        </button>
-                      </td>
-                    </tr>
+                          ) : (
+                            <span className="text-gray-400">Not Tagged</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-3 font-mono text-sm text-gray-600 whitespace-nowrap align-top">{prop.pin}</td>
+                        <td className="px-6 py-3 font-mono text-sm text-gray-600 whitespace-nowrap align-top">{prop.old_pin || '-'}</td>
+                        <td className="px-6 py-3 text-sm text-gray-600 whitespace-nowrap align-top">{prop.lot_no || '-'}</td>
+                        <td className="px-6 py-3 font-mono text-sm text-gray-600 text-right whitespace-nowrap align-top">{prop.total_area || '-'}</td>
+                        <td className="px-6 py-3 text-center whitespace-nowrap align-top">
+                          <button
+                            onClick={() => setRptarSelectedPropertyId(prop.id === rptarSelectedPropertyId ? null : prop.id)}
+                            className="text-xs font-medium text-gray-600 hover:text-blue-600 border border-gray-200 px-3 py-1.5 rounded-md hover:border-blue-200 hover:bg-blue-50 transition-all mx-auto block"
+                          >
+                            {rptarSelectedPropertyId === prop.id ? 'Hide' : 'Account History'}
+                          </button>
+                        </td>
+                      </tr>
+                    </React.Fragment>
                   ))}
               </tbody>
             </table>
@@ -3612,12 +3564,6 @@ export default function AdminPanel() {
             </div>
           </CardHeader>
           <CardContent className="pt-0 overflow-x-auto">
-            {rptarPayments.length === 0 ? (
-              <div className="text-center py-12">
-                <CreditCard className="w-12 h-12 text-gray-200 mx-auto mb-3" />
-                <p className="text-sm text-gray-400">No payment records found for this property.</p>
-              </div>
-            ) : (
               <table className="w-full text-xs text-left">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   {/* Main header row */}
@@ -3649,8 +3595,21 @@ export default function AdminPanel() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {rptarPayments.map(payment => {
+                  {(() => {
                     const prop = rptarSearchResults.find(p => p.id === rptarSelectedPropertyId);
+                    const displayPayments = rptarPayments.length > 0 ? rptarPayments : (prop ? [{
+                      id: 'synthetic-unpaid',
+                      year: new Date().getFullYear().toString(),
+                      assessed_value: prop.total_assessed_value || prop.assessed_value || 0,
+                      basic_tax: 0,
+                      sef_tax: 0,
+                      interest: 0,
+                      discount: 0,
+                      record_type: 'assessment',
+                      remarks: 'UNPAID'
+                    }] : []);
+                    
+                    return displayPayments.map(payment => {
                     
                     // Calculate number of years from year field (can be "1983" or "1983-1985")
                     let numberOfYears = 1;
@@ -3663,10 +3622,11 @@ export default function AdminPanel() {
                       }
                     }
                     
-                    // Calculate collectibles: 1% of assessed value × number of years
+                    // Calculate collectibles: 1% of assessed value × number of years (0 if retired)
+                    const isRetired = prop?.status?.toLowerCase().includes('retired') || false;
                     const assessedVal = payment.assessed_value ? parseFloat(String(payment.assessed_value)) : 0;
-                    const collectiblesBasic = (assessedVal * 0.01) * numberOfYears;
-                    const collectiblesSef = (assessedVal * 0.01) * numberOfYears;
+                    const collectiblesBasic = isRetired ? 0 : (assessedVal * 0.01) * numberOfYears;
+                    const collectiblesSef = isRetired ? 0 : (assessedVal * 0.01) * numberOfYears;
                     const collectiblesTotal = collectiblesBasic + collectiblesSef;
                     
                     // Collected data comes from actual payments (RPT abstract)
@@ -3676,7 +3636,7 @@ export default function AdminPanel() {
                     const balanceSef = collectiblesSef - collectedSef;
                     return (
                       <tr key={payment.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-3 py-3 font-medium text-gray-900 text-xs border-r border-gray-100">{prop?.td_no || '-'}</td>
+                        <td className="px-3 py-3 font-medium text-gray-900 text-xs border-r border-gray-100">{payment.td_no || prop?.td_no || '-'}</td>
                         <td className="px-3 py-3 text-gray-600 text-xs border-r border-gray-100">{payment.year || '-'}</td>
                         <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">
                           {payment.assessed_value ? parseFloat(String(payment.assessed_value)).toLocaleString(undefined, { minimumFractionDigits: 2 }) : '---'}
@@ -3699,10 +3659,10 @@ export default function AdminPanel() {
                         <td className="px-3 py-3 text-gray-500 text-xs italic">{payment.remarks || '-'}</td>
                       </tr>
                     );
-                  })}
+                  });
+                  })()}
                 </tbody>
               </table>
-            )}
           </CardContent>
         </Card>
       )}
@@ -3784,66 +3744,87 @@ export default function AdminPanel() {
         alert("Warning: Could not find PIN in PDF. Proceeding with extraction.\nPlease manually verify this is the correct property document.");
       }
 
-      // Extract years and assessed values from PDF
-      // Pattern: Assessed Value (left column) followed by Year(s) (right column)
-      // Matches: "1,234.56 1983" or "500.00 1983-1984"
-      const extractRegex = /(\d{1,3}(?:,\d{3})*(?:\.\d{2}))\s+(\d{4}(?:-\d{4})?)/g;
-      const yearEntries: Array<{ year: number; assessed_value: number }> = [];
-      let match;
+        // Proximity Search (Anchor-based) with Global De-duplication
+        // Identify large monetary amounts (Assessed Values) and check their surrounding context.
+        const moneyRegex = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{2}))\b/g;
+        const yearEntries: Array<{ year: number; assessed_value: number; td_no?: string }> = [];
+        const uniqueEntryKeys = new Set<string>(); // Prevent duplicates
+        const normalizedPropPin = prop.pin.replace(/\./g, '-').toUpperCase();
 
-      while ((match = extractRegex.exec(fullText)) !== null) {
-        const valueStr = match[1].trim();
-        const yearStr = match[2].trim();
-        const value = parseFloat(valueStr.replace(/,/g, ''));
+        let mMatch;
+        while ((mMatch = moneyRegex.exec(fullText)) !== null) {
+          const valStr = mMatch[1];
+          const value = parseFloat(valStr.replace(/,/g, ''));
 
-        if (isNaN(value) || value <= 0) continue;
+          // Scan context window around the monetary anchor
+          const start = Math.max(0, mMatch.index - 120);
+          const end = Math.min(fullText.length, mMatch.index + 120);
+          const window = fullText.substring(start, end);
 
-        // Parse year or year range
-        if (yearStr.includes('-')) {
-          const parts = yearStr.split('-');
-          const startY = parseInt(parts[0]);
-          const endY = parseInt(parts[1]);
-          if (!isNaN(startY) && !isNaN(endY) && startY >= 1900 && endY <= 2100) {
-            for (let y = startY; y <= endY; y++) {
-              yearEntries.push({ year: y, assessed_value: value });
+          // 1. Find Years (1[9]... or 2[0]...)
+          const yearsFound = window.match(/\b(1[9]\d{2}|2[0]\d{2})\b/g) || [];
+          if (yearsFound.length === 0) continue;
+
+          // 2. Find TD# (Exclude PIN)
+          const tdMatches = window.match(/\b(\d{2,4}-\d{3,}[\d\-A-Z]*)\b/g) || [];
+          const tdStr = tdMatches.find(t => t.toUpperCase() !== normalizedPropPin) || (tdMatches.length > 0 ? tdMatches[0] : '');
+          if (!tdStr) continue;
+        
+
+          // 3. Handle Year or Range
+          const hasDash = /[\-–]/.test(window);
+          const yParts = Array.from(new Set(yearsFound)).map(y => parseInt(y)).sort((a, b) => a - b);
+          
+          const addEntry = (y: number) => {
+            const key = `${y}-${tdStr.toUpperCase()}-${value.toFixed(2)}`;
+            if (!uniqueEntryKeys.has(key)) {
+              uniqueEntryKeys.add(key);
+              yearEntries.push({ year: y, assessed_value: value, td_no: tdStr });
             }
-          }
-        } else {
-          const y = parseInt(yearStr);
-          if (!isNaN(y) && y >= 1900 && y <= 2100) {
-            yearEntries.push({ year: y, assessed_value: value });
+          };
+
+          if (yParts.length >= 2 && hasDash) {
+            const startY = yParts[0];
+            const endY = yParts[yParts.length - 1];
+            for (let y = startY; y <= endY; y++) {
+              addEntry(y);
+            }
+          } else {
+            yParts.forEach(y => addEntry(y));
           }
         }
-      }
 
       if (yearEntries.length === 0) {
-        alert("No valid year and assessed value entries found in the PDF.\n\nTroubleshooting:\n• Format should be: Assessed Value (left) then Year (right)\n• Example: 1,234.56 1983 or 500.00 1983-1984");
+        alert("No valid entries found in the PDF.\n\nTroubleshooting:\n• Expected columns: TD#, Assessed Value, Year\n• Example: 001-0017-A 12,460.00 2003");
         return;
       }
 
       // Sort by year
       yearEntries.sort((a, b) => a.year - b.year);
 
-      // Group consecutive years with the same assessed value
-      const groupedRanges: Array<{ startYear: number; endYear: number; assessed_value: number }> = [];
+      // Group consecutive years with the same assessed value AND TD#
+      const groupedRanges: Array<{ startYear: number; endYear: number; assessed_value: number; td_no?: string }> = [];
       let currentStart = yearEntries[0].year;
       let currentAV = yearEntries[0].assessed_value;
+      let currentTD = yearEntries[0].td_no;
 
       for (let i = 1; i <= yearEntries.length; i++) {
         const nextEntry = yearEntries[i];
 
-        if (i === yearEntries.length || nextEntry.assessed_value !== currentAV || nextEntry.year !== yearEntries[i - 1].year + 1) {
+        if (i === yearEntries.length || nextEntry.assessed_value !== currentAV || nextEntry.td_no !== currentTD || nextEntry.year !== yearEntries[i - 1].year + 1) {
           // End of current group
           const endYear = yearEntries[i - 1].year;
           groupedRanges.push({
             startYear: currentStart,
             endYear: endYear,
-            assessed_value: currentAV
+            assessed_value: currentAV,
+            td_no: currentTD
           });
 
           if (i < yearEntries.length) {
             currentStart = nextEntry.year;
             currentAV = nextEntry.assessed_value;
+            currentTD = nextEntry.td_no;
           }
         }
       }
@@ -3856,6 +3837,7 @@ export default function AdminPanel() {
         newItems.push({
           property_id: parseInt(selectedComputationPropertyId),
           pin: prop.pin,
+          td_no: range.td_no,
           year: range.startYear === range.endYear ? range.startYear.toString() : `${range.startYear}-${range.endYear}`,
           yearCount: range.endYear - range.startYear + 1,
           computationType: paymentForm.computationType,
@@ -3866,6 +3848,7 @@ export default function AdminPanel() {
           discount: result.discount,
           amount: Number(result.amount),
           or_no: paymentForm.or_no,
+          remarks: range.td_no ? `TD#: ${range.td_no}` : '',
           fromPdfExtraction: true
         });
       }

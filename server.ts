@@ -596,6 +596,7 @@ const initDb = async (retries = 1, delay = 1000) => {
         DO $$ 
         BEGIN 
           -- Ensure payments columns
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS td_no TEXT;
           ALTER TABLE payments ADD COLUMN IF NOT EXISTS basic_tax NUMERIC;
           ALTER TABLE payments ADD COLUMN IF NOT EXISTS sef_tax NUMERIC;
           ALTER TABLE payments ADD COLUMN IF NOT EXISTS interest NUMERIC;
@@ -605,6 +606,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           ALTER TABLE payments ALTER COLUMN collector_id DROP NOT NULL;
 
           -- Ensure assessments columns
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS td_no TEXT;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS basic_tax NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS sef_tax NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS interest NUMERIC;
@@ -670,9 +672,9 @@ const initDb = async (retries = 1, delay = 1000) => {
       const manliePass = bcrypt.hashSync('To!nk6125', 10);
       const { rows: manlieRows } = await dbQuery('SELECT * FROM users WHERE LOWER(username) = $1', ['manlie']);
       if (manlieRows.length === 0) {
-        await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie (Admin/Collector)']);
+        await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie C. Ocang']);
       } else {
-        await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [manliePass, 'admin', 'Manlie (Admin/Collector)', 'manlie']);
+        await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [manliePass, 'admin', 'Manlie C. Ocang', 'manlie']);
       }
 
       // Seed Treas
@@ -1234,7 +1236,7 @@ async function startServer() {
       const { rows: payments } = await dbQuery(`
         SELECT 
           p.id, p.property_id, p.amount, p.payment_date, p.collector_id, p.or_no, p.year, 
-          p.basic_tax, p.sef_tax, p.interest, p.discount, p.remarks, p.taxpayer_id,
+          p.basic_tax, p.sef_tax, p.interest, p.discount, p.remarks, p.taxpayer_id, p.td_no,
           pr.pin, pr.registered_owner_name, 
           u.full_name as collector_name, 
           tp.full_name as taxpayer_name,
@@ -1253,7 +1255,7 @@ async function startServer() {
         SELECT 
           a.id, a.property_id, a.amount, a.created_at as payment_date, a.assigned_collector_id as collector_id, 
           NULL as or_no, a.year, 
-          a.basic_tax, a.sef_tax, a.interest, a.discount, NULL as remarks, a.taxpayer_id,
+          a.basic_tax, a.sef_tax, a.interest, a.discount, NULL as remarks, a.taxpayer_id, a.td_no,
           pr.pin, pr.registered_owner_name, 
           u.full_name as collector_name, 
           tp.full_name as taxpayer_name,
@@ -1474,10 +1476,19 @@ async function startServer() {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     const results: any[] = [];
+    // Detect potential separator in first line
+    const firstLine = req.file.buffer.toString().split('\n')[0];
+    let separator = ',';
+    if (firstLine.includes(';')) separator = ';';
+    else if (firstLine.includes('\t')) separator = '\t';
+    
+    console.log('[DEBUG-ABSTRACT] Auto-detected CSV separator:', { separator });
+
     const stream = Readable.from(req.file.buffer.toString());
 
     stream
       .pipe(csvParser({
+        separator,
         mapHeaders: ({ header }) => header.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
       }))
       .on('data', (data) => results.push(data))
@@ -1567,7 +1578,7 @@ async function startServer() {
               id SERIAL PRIMARY KEY,
               owner_id INTEGER REFERENCES users(id),
               registered_owner_name TEXT,
-              pin TEXT UNIQUE,
+              pin TEXT,
               td_no TEXT,
               lot_no TEXT,
               address TEXT,
@@ -1669,19 +1680,6 @@ async function startServer() {
                   taxability, effectivity, remarks
                 ) 
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                ON CONFLICT (pin) DO UPDATE SET
-                  td_no = EXCLUDED.td_no,
-                  registered_owner_name = EXCLUDED.registered_owner_name,
-                  lot_no = EXCLUDED.lot_no,
-                  total_area = EXCLUDED.total_area,
-                  assessed_value = EXCLUDED.assessed_value,
-                  kind = EXCLUDED.kind,
-                  classification = EXCLUDED.classification,
-                  old_pin = EXCLUDED.old_pin,
-                  status = EXCLUDED.status,
-                  taxability = EXCLUDED.taxability,
-                  effectivity = EXCLUDED.effectivity,
-                  remarks = EXCLUDED.remarks
               `, [
                 pin, tdNo, registeredOwner, lotNo, area,
                 assessedVal, kind, classification, oldPin, status || '',
@@ -1875,9 +1873,7 @@ async function startServer() {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     try {
       const { rows } = await dbQuery(`
-        SELECT id, username, full_name, last_active_at FROM users WHERE role = 'collector'
-        UNION
-        SELECT id, username, full_name, last_active_at FROM users WHERE LOWER(username) = 'manlie'
+        SELECT id, username, full_name, last_active_at FROM users WHERE role = 'collector' OR role = 'admin'
         ORDER BY full_name ASC
       `);
       res.json(rows);
@@ -1975,7 +1971,7 @@ async function startServer() {
 
   app.post('/api/payment', authenticateToken, async (req: any, res) => {
     if (req.user.role !== 'collector' && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-    const { property_id, amount, or_no, year, basic_tax, sef_tax, interest, discount, remarks } = req.body;
+    const { property_id, amount, or_no, year, basic_tax, sef_tax, interest, discount, remarks, td_no } = req.body;
      try {
       console.log(`[API PAYMENT] Start. Body:`, JSON.stringify(req.body));
       await dbQuery('BEGIN');
@@ -2003,12 +1999,12 @@ async function startServer() {
       const sanitizedDiscount = cleanNum(discount);
 
       // Record payment
-      const paymentParams = [property_id, property.owner_id, sanitizedAmount, new Date().toISOString(), req.user.id, or_no, year, sanitizedBasic, sanitizedSef, sanitizedInterest, sanitizedDiscount, remarks];
+      const paymentParams = [property_id, property.owner_id, sanitizedAmount, new Date().toISOString(), req.user.id, or_no, year, sanitizedBasic, sanitizedSef, sanitizedInterest, sanitizedDiscount, remarks, td_no];
       console.log(`[API PAYMENT] Inserting payment. Sanitized Params:`, paymentParams);
       
       await dbQuery(`
-        INSERT INTO payments (property_id, taxpayer_id, amount, payment_date, collector_id, or_no, year, basic_tax, sef_tax, interest, discount, remarks)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO payments (property_id, taxpayer_id, amount, payment_date, collector_id, or_no, year, basic_tax, sef_tax, interest, discount, remarks, td_no)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       `, paymentParams);
       console.log(`[API PAYMENT] Payment recorded`);
 
@@ -2086,7 +2082,7 @@ async function startServer() {
     
     try {
       let query = `
-        SELECT a.*, p.pin, p.registered_owner_name, p.lot_no, p.td_no, p.assessed_value as property_assessed_value, p.address, p.description, p.total_area
+        SELECT a.*, p.pin, p.registered_owner_name, p.lot_no, p.td_no as property_td_no, p.assessed_value as property_assessed_value, p.address, p.description, p.total_area
         FROM assessments a
         JOIN properties p ON a.property_id = p.id
         WHERE (a.status = 'pending' OR a.status IS NULL)
@@ -2122,7 +2118,7 @@ async function startServer() {
       
       await dbQuery('BEGIN');
       for (const assessment of assessments) {
-        const { property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount } = assessment;
+        const { property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, td_no } = assessment;
         
         // If assigned_collector_id is not provided, try to get it from the taxpayer
         let collectorId = assigned_collector_id;
@@ -2133,12 +2129,12 @@ async function startServer() {
             collectorId = userRes.rows[0].assigned_collector_id;
           }
         }
-        console.log('[DEBUG] Inserting assessment. Taxpayer:', taxpayer_id, 'Collector:', collectorId, 'Data:', { property_id, amount, year, assessed_value });
+        console.log('[DEBUG] Inserting assessment. Taxpayer:', taxpayer_id, 'Collector:', collectorId, 'Data:', { property_id, amount, year, assessed_value, td_no });
 
         await dbQuery(`
-          INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, created_at, status)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        `, [property_id, taxpayer_id, collectorId, amount, year, assessed_value || null, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending']);
+          INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, created_at, status, td_no)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        `, [property_id, taxpayer_id, collectorId, amount, year, assessed_value || null, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending', td_no]);
       }
       await dbQuery('COMMIT');
       
