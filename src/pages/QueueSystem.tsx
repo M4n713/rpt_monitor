@@ -998,15 +998,19 @@ function NowServingBigScreen() {
   const [nowServing, setNowServing] = useState<string>('---');
   const [queueList, setQueueList] = useState<any[]>([]);
   const [activeCollectors, setActiveCollectors] = useState<number>(0);
+  const [announcements, setAnnouncements] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const lastPlayedAudioIdRef = useRef<number>(-1);
+  const audioPlayerRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [nsRes, qRes, sRes] = await Promise.all([
+        const [nsRes, qRes, sRes, annRes] = await Promise.all([
           fetch('/api/queue/now-serving'),
           fetch('/api/queue/active'),
           fetch('/api/queue/stats'),
+          fetch('/api/public/announcements'),
         ]);
 
         const nsData = await nsRes.json();
@@ -1022,6 +1026,25 @@ function NowServingBigScreen() {
         const sData = await sRes.json();
         if (sData && typeof sData.active_collectors === 'number') {
           setActiveCollectors(sData.active_collectors);
+        }
+
+        const annData = await annRes.json();
+        if (Array.isArray(annData)) {
+          setAnnouncements(annData);
+          if (annData.length > 0) {
+            const latest = annData[0];
+            if (lastPlayedAudioIdRef.current === -1) {
+              lastPlayedAudioIdRef.current = latest.id;
+            } else if (latest.id > lastPlayedAudioIdRef.current) {
+              if (latest.audio_data && audioPlayerRef.current) {
+                audioPlayerRef.current.src = `data:${latest.audio_mime || 'audio/mpeg'};base64,${latest.audio_data}`;
+                audioPlayerRef.current.play().catch(e => console.error("Audio play failed:", e));
+              }
+              lastPlayedAudioIdRef.current = latest.id;
+            }
+          } else {
+            if (lastPlayedAudioIdRef.current === -1) lastPlayedAudioIdRef.current = 0;
+          }
         }
       } catch (err) {
         console.error('Failed to fetch data:', err);
@@ -1289,6 +1312,66 @@ function NowServingBigScreen() {
           </div>
         </div>
       </div>
+
+      {announcements.length > 0 && (
+        <div style={{
+          background: 'radial-gradient(ellipse at bottom, rgba(99, 102, 241, 0.15) 0%, transparent 100%)',
+          borderTop: '1px solid rgba(99, 102, 241, 0.1)',
+          padding: '24px 0',
+          overflow: 'hidden',
+          whiteSpace: 'nowrap',
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'center',
+          boxShadow: '0 -10px 30px rgba(0,0,0,0.2)',
+          zIndex: 50
+        }}>
+          <div style={{
+            padding: '0 32px 0 64px',
+            background: 'linear-gradient(90deg, #0f172a 80%, transparent)',
+            position: 'absolute',
+            left: 0,
+            zIndex: 10,
+            fontWeight: 800,
+            color: '#818cf8',
+            height: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            letterSpacing: '0.1em',
+            fontSize: '18px'
+          }}>
+            <Bell className="w-6 h-6 mr-3 text-indigo-400" />
+            ANNOUNCEMENTS
+          </div>
+          <div style={{
+            display: 'inline-block',
+            animation: 'marquee 30s linear infinite',
+            paddingLeft: '100vw'
+          }}>
+            {announcements.map((a, i) => (
+              <span key={i} style={{ 
+                marginRight: '120px', 
+                fontSize: '24px', 
+                fontWeight: 700,
+                display: 'inline-flex',
+                alignItems: 'center'
+              }}>
+                <span style={{ color: '#fff' }}>
+                  {a.audio_data && <Bell className="w-5 h-5 inline-block mr-2 text-indigo-400" />}
+                  {a.title}
+                </span>
+                {a.body && (
+                  <>
+                    <span style={{ margin: '0 16px', color: '#4f46e5' }}>•</span>
+                    <span style={{ fontWeight: 500, color: '#cbd5e1' }}>{a.body}</span>
+                  </>
+                )}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      <audio ref={audioPlayerRef} style={{ display: 'none' }} />
     </div>
   );
 }
@@ -1387,6 +1470,10 @@ export default function QueueSystem() {
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
           @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+          @keyframes marquee {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(-100%); }
+          }
         `}</style>
       </>
     );

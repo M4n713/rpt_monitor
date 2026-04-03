@@ -739,13 +739,40 @@ export default function CollectorPanel() {
         const rangeLabel = overallMin === overallMax ? `${overallMin}` : `${overallMin}-${overallMax}`;
         setPaymentForm(prev => ({ ...prev, year: rangeLabel }));
         setPreviewItems(generatedItems);
-        alert(`Successfully extracted and added ${generatedItems.length} ranges from PDF.`);
+
+        // Save extracted data to assessments table so it persists for later payment
+        if (selectedTaxpayerId) {
+          try {
+            const assessmentsToSave = generatedItems.map(item => ({
+              property_id: item.property_id,
+              taxpayer_id: selectedTaxpayerId,
+              amount: item.amount,
+              year: item.year,
+              assessed_value: item.assessed_value,
+              basic_tax: parseFloat(String(item.basic_tax || 0)),
+              sef_tax: parseFloat(String(item.sef_tax || 0)),
+              interest: parseFloat(String(item.interest || 0)),
+              discount: parseFloat(String(item.discount || 0))
+            }));
+
+            await fetch('/api/assessments', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(assessmentsToSave)
+            });
+          } catch (err) {
+            console.error('Failed to save assessments:', err);
+            // Don't alert user as this is a background operation
+          }
+        }
+
+        alert(`Successfully extracted and added ${generatedItems.length} ranges from SOA.`);
       } else {
-        alert("No valid data ranges found in the PDF. Please ensure the PDF contains clear year and assessed value columns.");
+        alert("No valid data ranges found in the SOA. Please ensure the document contains clear year and assessed value columns.");
       }
     } catch (err) {
       console.error('PDF processing error:', err);
-      alert('Failed to process PDF. Please make sure it is a valid PDF document.');
+      alert('Failed to process SOA. Please make sure it is a valid PDF document.');
     } finally {
       setIsPdfProcessing(false);
       if (pdfInputRef.current) pdfInputRef.current.value = '';
@@ -1121,6 +1148,19 @@ export default function CollectorPanel() {
     newQueue.splice(index, 1);
     setPaymentQueue(newQueue);
 
+    // Record time_out for the taxpayer when item is removed from queue
+    if (selectedTaxpayerId) {
+      try {
+        await fetch('/api/taxpayer-log/time-out', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taxpayer_id: selectedTaxpayerId })
+        });
+      } catch (err) {
+        console.error('Failed to record time_out:', err);
+      }
+    }
+
     // Refresh assessments, but keep assessments already moved to `paymentQueue` hidden.
     // `/api/assessments` returns the server-side pending list and does NOT know about
     // the client-side `paymentQueue`, so a plain refetch would cause other items to re-appear.
@@ -1330,6 +1370,24 @@ export default function CollectorPanel() {
   const handleRemoveAssessment = async (assessmentId: number) => {
     if (!confirm('Are you sure you want to remove this suggested computation?')) return;
     try {
+      // Find the assessment to get taxpayer_id
+      const assessment = pendingAssessments.find((a: any) => a.id === assessmentId);
+      const taxpayerId = assessment?.taxpayer_id;
+
+      // Record time_out for the taxpayer when assessment is removed
+      if (taxpayerId) {
+        try {
+          await fetch('/api/taxpayer-log/time-out', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ taxpayer_id: taxpayerId })
+          });
+        } catch (err) {
+          console.error('Failed to record time_out:', err);
+        }
+      }
+
+      // Delete the assessment
       const res = await fetch(`/api/assessments/${assessmentId}`, {
         method: 'DELETE'
       });
@@ -1969,7 +2027,7 @@ export default function CollectorPanel() {
                         className="h-12 text-sm font-semibold gap-2 px-3 leading-tight w-24 whitespace-normal"
                       >
                         {isPdfProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-2" />}
-                        Upload PDF
+                        Upload SOA
                       </Button>
                     </div>
                   </div>
@@ -2334,11 +2392,9 @@ export default function CollectorPanel() {
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider">Registered Owner</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider">Taxpayer</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">PIN</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">TD No.</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Lot No.</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right whitespace-nowrap">Area</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Assessed<br />Value</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-center whitespace-nowrap">Action</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-left whitespace-nowrap">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
@@ -2360,17 +2416,9 @@ export default function CollectorPanel() {
                       )}
                     </td>
                     <td className="px-6 py-4 font-mono text-sm text-gray-600 whitespace-nowrap">{prop.pin}</td>
-                    <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.td_no}</td>
                     <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.lot_no}</td>
                     <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">{prop.total_area || '-'}</td>
-                    <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">
-                      <span className="inline-flex items-center justify-end w-full">
-                        <span className="invisible">(</span>
-                        {parseFloat(String(prop.assessed_value || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                        <span className="invisible">)</span>
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-center">
+                    <td className="px-6 py-4 text-left align-middle leading-none">
                       <Button
                         size="sm"
                         variant={rptarSelectedPropertyId === prop.id ? "default" : "outline"}
@@ -2378,7 +2426,7 @@ export default function CollectorPanel() {
                         className="h-8 text-xs gap-2"
                       >
                         <History className="w-3 h-3" />
-                        {rptarSelectedPropertyId === prop.id ? 'Hide History' : 'Payment History'}
+                        {rptarSelectedPropertyId === prop.id ? 'Hide History' : 'Account History'}
                       </Button>
                     </td>
                   </tr>
@@ -2395,7 +2443,7 @@ export default function CollectorPanel() {
             <div className="flex justify-between items-center">
               <CardTitle className="text-lg font-bold flex items-center gap-2 text-gray-900">
                 <History className="w-5 h-5 text-gray-700" />
-                Payment History
+                Account History
               </CardTitle>
             </div>
           </CardHeader>
@@ -2406,71 +2454,85 @@ export default function CollectorPanel() {
                 <p className="text-sm text-gray-400">No payment records found for this property.</p>
               </div>
             ) : (
-              <table className="w-full text-sm text-left">
+              <table className="w-full text-xs text-left">
                 <thead className="bg-gray-50 border-b border-gray-200">
+                  {/* Main header row */}
                   <tr>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Date</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">OR No.</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Year</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Basic<br />Tax</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">SEF<br />Tax</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Interest</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Discount</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Total</th>
+                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap border-r border-gray-200">TD No.</th>
+                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap border-r border-gray-200">Year<br />Covered</th>
+                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-right border-r border-gray-200">Assessed<br />Value</th>
+                    <th colSpan={3} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Collectibles</th>
+                    <th colSpan={7} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Collected</th>
+                    <th colSpan={2} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Balance</th>
+                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap">Remarks</th>
+                  </tr>
+                  {/* Sub-header row */}
+                  <tr className="border-t border-gray-200">
+                    <th colSpan={3}></th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Total</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Date</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">OR No.</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Interest</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Discount</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Total</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {rptarPayments.map(payment => {
+                    const prop = rptarSearchResults.find(p => p.id === rptarSelectedPropertyId);
+                    
+                    // Calculate number of years from year field (can be "1983" or "1983-1985")
+                    let numberOfYears = 1;
+                    if (payment.year && typeof payment.year === 'string' && payment.year.includes('-')) {
+                      const [startStr, endStr] = payment.year.split('-');
+                      const start = parseInt(startStr);
+                      const end = parseInt(endStr);
+                      if (!isNaN(start) && !isNaN(end)) {
+                        numberOfYears = end - start + 1;
+                      }
+                    }
+                    
+                    // Calculate collectibles: 1% of assessed value × number of years
+                    const assessedVal = payment.assessed_value ? parseFloat(String(payment.assessed_value)) : 0;
+                    const collectiblesBasic = (assessedVal * 0.01) * numberOfYears;
+                    const collectiblesSef = (assessedVal * 0.01) * numberOfYears;
+                    const collectiblesTotal = collectiblesBasic + collectiblesSef;
+                    
+                    // Collected data comes from actual payments (RPT abstract)
+                    const collectedBasic = payment.record_type === 'payment' ? parseFloat(String(payment.basic_tax || 0)) : 0;
+                    const collectedSef = payment.record_type === 'payment' ? parseFloat(String(payment.sef_tax || 0)) : 0;
+                    const balanceBasic = collectiblesBasic - collectedBasic;
+                    const balanceSef = collectiblesSef - collectedSef;
                     return (
                       <tr key={payment.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-6 py-4 font-medium text-gray-900 text-sm">{new Date(payment.payment_date).toLocaleDateString()}</td>
-                        <td className="px-6 py-4 font-mono text-sm text-gray-600">{payment.or_no || '-'}</td>
-                        <td className="px-6 py-4 text-gray-600 text-sm">{payment.year || '-'}</td>
-                        <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm">
-                          <span className="inline-flex items-center justify-end w-full">
-                            <span className="invisible">(</span>
-                            {parseFloat(String(payment.basic_tax || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            <span className="invisible">)</span>
-                          </span>
+                        <td className="px-3 py-3 font-medium text-gray-900 text-xs border-r border-gray-100">{prop?.td_no || '-'}</td>
+                        <td className="px-3 py-3 text-gray-600 text-xs border-r border-gray-100">{payment.year || '-'}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">
+                          {payment.assessed_value ? parseFloat(String(payment.assessed_value)).toLocaleString(undefined, { minimumFractionDigits: 2 }) : '---'}
                         </td>
-                        <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm">
-                          <span className="inline-flex items-center justify-end w-full">
-                            <span className="invisible">(</span>
-                            {parseFloat(String(payment.sef_tax || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            <span className="invisible">)</span>
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm">
-                          <span className="inline-flex items-center justify-end w-full">
-                            <span className="invisible">(</span>
-                            {parseFloat(String(payment.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            <span className="invisible">)</span>
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm">
-                          <span className="inline-flex items-center justify-end w-full">
-                            {parseFloat(String(payment.discount || 0)) > 0 ? (
-                              <>
-                                <span>(</span>
-                                {parseFloat(String(payment.discount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                <span>)</span>
-                              </>
-                            ) : (
-                              <>
-                                <span className="invisible">(</span>
-                                {'0.00'}
-                                <span className="invisible">)</span>
-                              </>
-                            )}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-right font-bold font-mono text-gray-900 text-sm">
-                          <span className="inline-flex items-center justify-end w-full">
-                            <span className="invisible">(</span>
-                            {parseFloat(String(payment.amount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            <span className="invisible">)</span>
-                          </span>
-                        </td>
+                        {/* Collectibles */}
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{collectiblesTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        {/* Collected */}
+                        <td className="px-3 py-3 text-right font-medium text-gray-600 text-xs border-r border-gray-100">{payment.payment_date ? new Date(payment.payment_date).toLocaleDateString() : '---'}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-600 text-xs border-r border-gray-100">{payment.or_no || '---'}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.discount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{(collectedBasic + collectedSef + parseFloat(String(payment.interest || 0)) - parseFloat(String(payment.discount || 0))).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        {/* Balance */}
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-gray-500 text-xs italic">{payment.remarks || '-'}</td>
                       </tr>
                     );
                   })}

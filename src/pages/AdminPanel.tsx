@@ -464,11 +464,14 @@ export default function AdminPanel() {
     computationType: 'standard'
   });
 
-  const [messageForm, setMessageForm] = useState({
+  const [messageForm, setMessageForm] = useState<{title: string, body: string, target_role: string, audioFile: File | null}>({
     title: '',
     body: '',
-    target_role: 'all'
+    target_role: 'all',
+    audioFile: null
   });
+
+  const messageAudioInputRef = useRef<HTMLInputElement>(null);
 
   const [collectorForm, setCollectorForm] = useState({
     username: '',
@@ -720,7 +723,7 @@ export default function AdminPanel() {
 
   const menuItems = [
     { id: 'tagging', label: 'Assessment Roll', subtitle: 'Search and Link Properties', icon: Tag },
-    ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'payment-queue', label: 'Payment Queue', subtitle: 'Manage Payments and Assessments', icon: CreditCard }] : []),
+    ...(['manlie', 'rhea', 'glaiza'].includes(user?.username?.toLowerCase() || '') ? [{ id: 'payment-queue', label: 'Payment Queue', subtitle: 'Manage Payments and Assessments', icon: CreditCard }] : []),
     { id: 'computation', label: 'RPT Computation', subtitle: 'Calculate Tax Due', icon: Calculator },
     { id: 'rptar', label: 'RPTAR', subtitle: 'RPT Account Register', icon: User },
     { id: 'rpt-abstract', label: 'RPT Abstract', subtitle: 'Record of Collections', icon: FileText },
@@ -1147,18 +1150,26 @@ export default function AdminPanel() {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!messageForm.title || !messageForm.body) return;
+    if (!messageForm.title && !messageForm.audioFile) return;
 
     try {
-      const res = await fetch('/api/admin/messages', {
+      const formData = new FormData();
+      formData.append('title', messageForm.title);
+      formData.append('body', messageForm.body);
+      formData.append('target_role', messageForm.target_role);
+      if (messageForm.audioFile) {
+        formData.append('audio', messageForm.audioFile);
+      }
+
+      const res = await fetch('/api/admin/broadcast', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(messageForm),
+        body: formData,
       });
 
       if (res.ok) {
         alert('Message sent successfully');
-        setMessageForm({ title: '', body: '', target_role: 'all' });
+        setMessageForm({ title: '', body: '', target_role: 'all', audioFile: null });
+        if (messageAudioInputRef.current) messageAudioInputRef.current.value = '';
       } else {
         const contentType = res.headers.get('content-type');
         if (contentType && contentType.includes('application/json')) {
@@ -1629,10 +1640,24 @@ export default function AdminPanel() {
     setPaymentQueue(newQueue);
   };
 
-  const removeFromQueue = (index: number) => {
+  const removeFromQueue = async (index: number) => {
+    const removedItem = paymentQueue[index];
     const newQueue = [...paymentQueue];
     newQueue.splice(index, 1);
     setPaymentQueue(newQueue);
+
+    // Record time_out for the taxpayer when item is removed from queue
+    if (selectedTaxpayerId) {
+      try {
+        await fetch('/api/taxpayer-log/time-out', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taxpayer_id: parseInt(selectedTaxpayerId) })
+        });
+      } catch (err) {
+        console.error('Failed to record time_out:', err);
+      }
+    }
 
     // Sync Year/Range input and Computation Breakdown to the remaining items
     if (newQueue.length > 0) {
@@ -2678,7 +2703,7 @@ export default function AdminPanel() {
                           className="h-12 rounded-none text-sm font-semibold gap-2 px-3 leading-tight w-24 whitespace-normal"
                         >
                           {isPdfProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-2" />}
-                          Upload PDF
+                          Upload SOA
                         </Button>
                       </div>
                     </div>
@@ -2891,7 +2916,7 @@ export default function AdminPanel() {
               placeholder="e.g. System Maintenance"
               value={messageForm.title}
               onChange={(e) => setMessageForm({ ...messageForm, title: e.target.value })}
-              required
+              required={!messageForm.audioFile}
             />
           </div>
 
@@ -2903,7 +2928,19 @@ export default function AdminPanel() {
               placeholder="Type your message here..."
               value={messageForm.body}
               onChange={(e) => setMessageForm({ ...messageForm, body: e.target.value })}
-              required
+              required={!messageForm.audioFile}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="msg-audio" className="text-xs font-semibold">Audio Announcement (Optional)</Label>
+            <Input
+              id="msg-audio"
+              type="file"
+              accept="audio/*"
+              ref={messageAudioInputRef}
+              onChange={(e) => setMessageForm({ ...messageForm, audioFile: e.target.files?.[0] || null })}
+              className="w-full"
             />
           </div>
 
@@ -2918,6 +2955,7 @@ export default function AdminPanel() {
               <option value="all">All Users</option>
               <option value="taxpayer">Taxpayers Only</option>
               <option value="collector">Collectors Only</option>
+              <option value="queue_system">Queue System Only</option>
             </select>
           </div>
 
@@ -3468,16 +3506,14 @@ export default function AdminPanel() {
             <table className="w-full text-sm text-left">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Kind</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider">Registered Owner</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider">Taxpayer</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">PIN</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Old PIN</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">TD No.</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Lot No.</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right whitespace-nowrap">Area</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Assessed<br />Value</th>
-                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-center whitespace-nowrap">Action</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-bottom">Kind</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider align-bottom">Registered Owner</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider align-bottom">Taxpayer</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-bottom">PIN</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-bottom">Old PIN</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap align-bottom">Lot No.</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right whitespace-nowrap align-bottom">Area</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-left whitespace-nowrap align-bottom">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
@@ -3488,16 +3524,23 @@ export default function AdminPanel() {
                       key={prop.id}
                       className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                     >
-                      <td className="px-6 py-4 text-[11px] font-bold text-gray-600 uppercase tracking-tighter whitespace-nowrap">
-                        {prop.kind || prop.description || '-'}
+                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left align-middle leading-tight">
+                        <div className="flex flex-col gap-1 items-start">
+                          <span>{prop.kind || prop.description || '-'}</span>
+                          {prop.classification && (
+                            <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200 w-fit">
+                              {prop.classification}
+                            </span>
+                          )}
+                        </div>
                       </td>
-                      <td className="px-6 py-4 text-gray-900 font-medium text-sm whitespace-normal break-words leading-tight">
-                        <div className="flex flex-col gap-1">
-                          <span>{prop.registered_owner_name}</span>
-                          <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap mt-1">
+                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left align-middle leading-tight">
+                        <div className="flex flex-col gap-2 items-start">
+                          <span className="break-words">{prop.registered_owner_name}</span>
+                          <div className="flex items-center gap-x-1.5 gap-y-1.5 flex-wrap mt-1">
                             {/* Status Badge */}
                             {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
-                              <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${(prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
+                              <span className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border align-middle leading-none h-[20px] flex items-center ${(prop.status.toLowerCase().includes('active') || prop.status.toLowerCase().startsWith('act'))
                                 ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                 : (prop.status.toLowerCase().includes('delinquent') || prop.status.toLowerCase().includes('del'))
                                   ? 'bg-red-50 text-red-700 border-red-200'
@@ -3507,24 +3550,19 @@ export default function AdminPanel() {
                               </span>
                             )}
                             {prop.taxability && (
-                              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-50 text-blue-700 border border-blue-200 align-middle leading-none h-[20px] flex items-center">
                                 {prop.taxability}
                               </span>
                             )}
-                            {prop.classification && (
-                              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
-                                {prop.classification}
-                              </span>
-                            )}
                             {prop.remarks && (
-                              <span className="px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200">
+                              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-orange-50 text-orange-700 border border-orange-200 align-middle leading-none h-[20px] flex items-center">
                                 {prop.remarks}
                               </span>
                             )}
                           </div>
                         </div>
                       </td>
-                      <td className="px-6 py-4 text-gray-600 text-sm whitespace-normal break-words leading-tight">
+                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left align-middle leading-tight">
                         {prop.linked_taxpayer ? (
                           <div className="flex flex-col gap-1 items-start">
                             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
@@ -3539,31 +3577,21 @@ export default function AdminPanel() {
                             </span>
                           </div>
                         ) : (
-                          <span className="text-gray-400 text-xs italic">Not Tagged</span>
+                          <span className="text-gray-600 text-sm">Not Tagged</span>
                         )}
                       </td>
-                      <td className="px-6 py-4 font-mono text-sm text-gray-600 whitespace-nowrap">{prop.pin}</td>
-                      <td className="px-6 py-4 font-mono text-sm text-gray-400 whitespace-nowrap">{prop.old_pin || '-'}</td>
-                      <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.td_no}</td>
-                      <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.lot_no}</td>
-                      <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">{prop.total_area || '-'}</td>
-                      <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">
-                        <span className="inline-flex items-center justify-end w-full">
-                          <span className="invisible">(</span>
-                          {parseFloat(String(prop.assessed_value || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                          <span className="invisible">)</span>
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <Button
-                          size="sm"
-                          variant={rptarSelectedPropertyId === prop.id ? "default" : "outline"}
+                      <td className="px-6 py-4 font-mono text-sm text-gray-600 text-left whitespace-nowrap align-middle leading-tight">{prop.pin}</td>
+                      <td className="px-6 py-4 font-mono text-sm text-gray-600 text-left whitespace-nowrap align-middle leading-tight">{prop.old_pin || '-'}</td>
+                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left whitespace-nowrap align-middle leading-tight">{prop.lot_no}</td>
+                      <td className="px-6 py-4 font-mono text-sm text-gray-600 text-right whitespace-nowrap align-middle leading-tight">{prop.total_area || '-'}</td>
+                      <td className="px-6 py-4 text-sm font-normal text-gray-600 text-left whitespace-nowrap align-middle leading-none">
+                        <button
                           onClick={() => setRptarSelectedPropertyId(prop.id === rptarSelectedPropertyId ? null : prop.id)}
-                          className="h-8 text-xs gap-2"
+                          className="text-sm font-normal text-gray-600 hover:text-gray-900 bg-transparent border border-gray-300 px-3 py-1 rounded h-8 w-fit hover:bg-gray-50 inline-flex items-center justify-center gap-2"
                         >
-                          <History className="w-3 h-3" />
-                          {rptarSelectedPropertyId === prop.id ? 'Hide History' : 'Payment History'}
-                        </Button>
+                          <History className="w-4 h-4" />
+                          {rptarSelectedPropertyId === prop.id ? 'Hide History' : 'Account History'}
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -3579,7 +3607,7 @@ export default function AdminPanel() {
             <div className="flex justify-between items-center">
               <CardTitle className="text-lg font-bold flex items-center gap-2 text-gray-900">
                 <History className="w-5 h-5 text-gray-700" />
-                Payment History
+                Account History
               </CardTitle>
             </div>
           </CardHeader>
@@ -3590,75 +3618,85 @@ export default function AdminPanel() {
                 <p className="text-sm text-gray-400">No payment records found for this property.</p>
               </div>
             ) : (
-              <table className="w-full text-sm text-left">
+              <table className="w-full text-xs text-left">
                 <thead className="bg-gray-50 border-b border-gray-200">
+                  {/* Main header row */}
                   <tr>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Date</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">OR No.</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Year</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Basic<br />Tax</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">SEF<br />Tax</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Interest</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Discount</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Total</th>
-                    <th className="px-6 py-4 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Paid by:</th>
+                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap border-r border-gray-200">TD No.</th>
+                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap border-r border-gray-200">Year<br />Covered</th>
+                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-right border-r border-gray-200">Assessed<br />Value</th>
+                    <th colSpan={3} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Collectibles</th>
+                    <th colSpan={7} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Collected</th>
+                    <th colSpan={2} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Balance</th>
+                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap">Remarks</th>
+                  </tr>
+                  {/* Sub-header row */}
+                  <tr className="border-t border-gray-200">
+                    <th colSpan={3}></th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Total</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Date</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">OR No.</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Interest</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Discount</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Total</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
+                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {rptarPayments.map(payment => {
                     const prop = rptarSearchResults.find(p => p.id === rptarSelectedPropertyId);
-                    const taggedTo = prop?.linked_taxpayer || '';
+                    
+                    // Calculate number of years from year field (can be "1983" or "1983-1985")
+                    let numberOfYears = 1;
+                    if (payment.year && typeof payment.year === 'string' && payment.year.includes('-')) {
+                      const [startStr, endStr] = payment.year.split('-');
+                      const start = parseInt(startStr);
+                      const end = parseInt(endStr);
+                      if (!isNaN(start) && !isNaN(end)) {
+                        numberOfYears = end - start + 1;
+                      }
+                    }
+                    
+                    // Calculate collectibles: 1% of assessed value × number of years
+                    const assessedVal = payment.assessed_value ? parseFloat(String(payment.assessed_value)) : 0;
+                    const collectiblesBasic = (assessedVal * 0.01) * numberOfYears;
+                    const collectiblesSef = (assessedVal * 0.01) * numberOfYears;
+                    const collectiblesTotal = collectiblesBasic + collectiblesSef;
+                    
+                    // Collected data comes from actual payments (RPT abstract)
+                    const collectedBasic = payment.record_type === 'payment' ? parseFloat(String(payment.basic_tax || 0)) : 0;
+                    const collectedSef = payment.record_type === 'payment' ? parseFloat(String(payment.sef_tax || 0)) : 0;
+                    const balanceBasic = collectiblesBasic - collectedBasic;
+                    const balanceSef = collectiblesSef - collectedSef;
                     return (
                       <tr key={payment.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-6 py-4 font-medium text-gray-900 text-sm">{new Date(payment.payment_date).toLocaleDateString()}</td>
-                        <td className="px-6 py-4 font-mono text-sm text-gray-600">{payment.or_no || '-'}</td>
-                        <td className="px-6 py-4 text-gray-600 text-sm">{payment.year || '-'}</td>
-                        <td className="px-6 py-4 text-right font-mono text-sm text-gray-700">
-                          <span className="inline-flex items-center justify-end w-full">
-                            <span className="invisible">(</span>
-                            {parseFloat(String(payment.basic_tax || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            <span className="invisible">)</span>
-                          </span>
+                        <td className="px-3 py-3 font-medium text-gray-900 text-xs border-r border-gray-100">{prop?.td_no || '-'}</td>
+                        <td className="px-3 py-3 text-gray-600 text-xs border-r border-gray-100">{payment.year || '-'}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">
+                          {payment.assessed_value ? parseFloat(String(payment.assessed_value)).toLocaleString(undefined, { minimumFractionDigits: 2 }) : '---'}
                         </td>
-                        <td className="px-6 py-4 text-right font-mono text-sm text-gray-700">
-                          <span className="inline-flex items-center justify-end w-full">
-                            <span className="invisible">(</span>
-                            {parseFloat(String(payment.sef_tax || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            <span className="invisible">)</span>
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-right font-mono text-sm text-gray-700">
-                          <span className="inline-flex items-center justify-end w-full">
-                            <span className="invisible">(</span>
-                            {parseFloat(String(payment.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            <span className="invisible">)</span>
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-right font-mono text-sm text-gray-700">
-                          <span className="inline-flex items-center justify-end w-full">
-                            {parseFloat(String(payment.discount || 0)) > 0 ? (
-                              <>
-                                <span>(</span>
-                                {parseFloat(String(payment.discount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                <span>)</span>
-                              </>
-                            ) : (
-                              <>
-                                <span className="invisible">(</span>
-                                {'0.00'}
-                                <span className="invisible">)</span>
-                              </>
-                            )}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-right font-bold font-mono text-sm text-gray-900">
-                          <span className="inline-flex items-center justify-end w-full">
-                            <span className="invisible">(</span>
-                            {parseFloat(String(payment.amount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                            <span className="invisible">)</span>
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-gray-500 text-sm italic">{taggedTo}</td>
+                        {/* Collectibles */}
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{collectiblesTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        {/* Collected */}
+                        <td className="px-3 py-3 text-right font-medium text-gray-600 text-xs border-r border-gray-100">{payment.payment_date ? new Date(payment.payment_date).toLocaleDateString() : '---'}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-600 text-xs border-r border-gray-100">{payment.or_no || '---'}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.discount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{(collectedBasic + collectedSef + parseFloat(String(payment.interest || 0)) - parseFloat(String(payment.discount || 0))).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        {/* Balance */}
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-3 text-gray-500 text-xs italic">{payment.remarks || '-'}</td>
                       </tr>
                     );
                   })}
@@ -3859,7 +3897,34 @@ export default function AdminPanel() {
         // Store the extracted data for real-time recalculation
         setExtractedPdfData(groupedRanges);
         setPaymentQueue(prev => [...prev, ...newItems]);
-        alert(`Successfully extracted and added ${newItems.length} year range(s) from PDF.\nGrouped by assessed value: ${newItems.length} group(s) created.`);
+
+        // Save extracted data to assessments table so it persists for later payment
+        if (selectedTaxpayerId) {
+          try {
+            const assessmentsToSave = newItems.map(item => ({
+              property_id: item.property_id,
+              taxpayer_id: parseInt(selectedTaxpayerId),
+              amount: item.amount,
+              year: item.year,
+              assessed_value: parseFloat(String(item.assessed_value)),
+              basic_tax: parseFloat(String(item.basic_tax || 0)),
+              sef_tax: parseFloat(String(item.sef_tax || 0)),
+              interest: parseFloat(String(item.interest || 0)),
+              discount: parseFloat(String(item.discount || 0))
+            }));
+
+            await fetch('/api/assessments', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(assessmentsToSave)
+            });
+          } catch (err) {
+            console.error('Failed to save assessments:', err);
+            // Don't alert user as this is a background operation
+          }
+        }
+
+        alert(`Successfully extracted and added ${newItems.length} year range(s) from SOA.\nGrouped by assessed value: ${newItems.length} group(s) created.`);
       } else {
         alert("No valid ranges could be generated from the extracted years.");
       }

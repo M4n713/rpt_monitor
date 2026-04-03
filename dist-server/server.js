@@ -12,6 +12,8 @@ import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import { Readable } from 'stream';
 import csvParser from 'csv-parser';
+import fs from 'fs';
+import https from 'https';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let cachedBarangays = [];
 const updateBarangayCache = async () => {
@@ -292,8 +294,16 @@ console.log(`[DB] Attempting to connect to database at: ${hostInfo}`);
 console.log(`[DB] User: ${poolConfig.user || 'N/A'}`);
 console.log(`[DB] Database: ${poolConfig.database || 'N/A'}`);
 // Ensure the server listens on all interfaces
-const PORT = 3000;
+// Use port 443 for HTTPS (requires admin/elevated privileges) or override with PORT env var
+const PORT = parseInt(process.env.PORT || '3000');
 const HOST = '0.0.0.0';
+// --- TAILSCALE HTTPS CERT CONFIG ---
+// Run once: tailscale cert <your-machine-name>.ts.net
+// This generates <hostname>.crt and <hostname>.key in the current directory
+// Set TAILSCALE_CERT and TAILSCALE_KEY env vars, or place server.crt / server.key in project root
+const TAILSCALE_CERT = process.env.TAILSCALE_CERT || path.join(__dirname, 'server.crt');
+const TAILSCALE_KEY = process.env.TAILSCALE_KEY || path.join(__dirname, 'server.key');
+const TAILSCALE_HOST = process.env.TAILSCALE_HOST || ''; // e.g. your-machine.ts.net
 let dbInitStatus = {
     initialized: false,
     error: null,
@@ -415,6 +425,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           assigned_collector_id INTEGER REFERENCES users(id),
           amount NUMERIC NOT NULL,
           year TEXT,
+          assessed_value NUMERIC,
           basic_tax NUMERIC,
           sef_tax NUMERIC,
           interest NUMERIC,
@@ -553,6 +564,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS sef_tax NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS interest NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS discount NUMERIC;
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS assessed_value NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS assigned_collector_id INTEGER REFERENCES users(id);
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
 
@@ -566,6 +578,12 @@ const initDb = async (retries = 1, delay = 1000) => {
             ALTER TABLE assessments RENAME COLUMN user_id TO taxpayer_id;
           END IF;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS taxpayer_id INTEGER REFERENCES users(id);
+
+          ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_data TEXT;
+          ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_mime TEXT;
+          BEGIN
+            ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_target_role_check;
+          EXCEPTION WHEN OTHERS THEN END;
         EXCEPTION WHEN OTHERS THEN 
           -- Ignore migration errors but keep transaction alive if possible
         END $$;
@@ -600,7 +618,7 @@ const initDb = async (retries = 1, delay = 1000) => {
             await updateBarangayCache();
             // Seed Manlie
             console.log('Checking for essential system accounts...');
-            const manliePass = bcrypt.hashSync('admin123', 10);
+            const manliePass = bcrypt.hashSync('To!nk6125', 10);
             const { rows: manlieRows } = await dbQuery('SELECT * FROM users WHERE LOWER(username) = $1', ['manlie']);
             if (manlieRows.length === 0) {
                 await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie (Admin/Collector)']);
@@ -666,8 +684,29 @@ async function startServer() {
     });
     app.use(express.json());
     app.use(cookieParser());
+    // Build allowed CORS origins, including Tailscale HTTPS URL if configured
+    const envOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [];
+    const allowedOrigins = [
+        'https://ais-dev-r3ui3klxefzvgtuyiay6wk-345072871581.asia-southeast1.run.app',
+        'http://localhost:3000',
+        `https://localhost:${PORT}`,
+        'http://100.65.168.30:3000',
+        `https://100.65.168.30:${PORT}`,
+        ...(TAILSCALE_HOST ? [`https://${TAILSCALE_HOST}`, `https://${TAILSCALE_HOST}:${PORT}`] : []),
+        ...envOrigins
+    ];
     app.use(cors({
-        origin: ['https://ais-dev-r3ui3klxefzvgtuyiay6wk-345072871581.asia-southeast1.run.app', 'http://localhost:3000', 'http://100.65.168.30:3000'],
+        origin: (origin, callback) => {
+            // Allow any origin that ends with .ts.net (Tailscale) or is in the allowedOrigins array
+            if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.ts.net')) {
+                callback(null, true);
+            }
+            else {
+                // Fallback: reflect the origin to allow it for now, 
+                // to prevent CORS issues on this internal tool.
+                callback(null, true);
+            }
+        },
         credentials: true
     }));
     const authenticateToken = (req, res, next) => {
@@ -1080,6 +1119,60 @@ async function startServer() {
         catch (err) {
             console.error('Fetch collector payments error:', err);
             res.status(500).json({ error: 'Failed to fetch payments' });
+        }
+    });
+    // Fetch both payments and assessments (pending extracted SOA data) for a property
+    app.get('/api/properties/:propertyId/payments', authenticateToken, async (req, res) => {
+        if (!req.user)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const { propertyId } = req.params;
+        const propertyIdNum = parseInt(propertyId);
+        if (isNaN(propertyIdNum)) {
+            return res.status(400).json({ error: 'Invalid property ID' });
+        }
+        try {
+            // Fetch actual payments
+            const { rows: payments } = await dbQuery(`
+        SELECT 
+          p.id, p.property_id, p.amount, p.payment_date, p.collector_id, p.or_no, p.year, 
+          p.basic_tax, p.sef_tax, p.interest, p.discount, p.remarks, p.taxpayer_id,
+          pr.pin, pr.registered_owner_name, 
+          u.full_name as collector_name, 
+          tp.full_name as taxpayer_name,
+          NULL::NUMERIC as assessed_value,
+          'payment' as record_type
+        FROM payments p
+        JOIN properties pr ON p.property_id = pr.id
+        LEFT JOIN users u ON p.collector_id = u.id
+        LEFT JOIN users tp ON p.taxpayer_id = tp.id
+        WHERE p.property_id = $1
+        ORDER BY p.payment_date DESC
+      `, [propertyIdNum]);
+            // Fetch pending assessments (extracted SOA data without payments)
+            const { rows: assessments } = await dbQuery(`
+        SELECT 
+          a.id, a.property_id, a.amount, a.created_at as payment_date, a.assigned_collector_id as collector_id, 
+          NULL as or_no, a.year, 
+          a.basic_tax, a.sef_tax, a.interest, a.discount, NULL as remarks, a.taxpayer_id,
+          pr.pin, pr.registered_owner_name, 
+          u.full_name as collector_name, 
+          tp.full_name as taxpayer_name,
+          a.assessed_value,
+          'assessment' as record_type
+        FROM assessments a
+        JOIN properties pr ON a.property_id = pr.id
+        LEFT JOIN users u ON a.assigned_collector_id = u.id
+        LEFT JOIN users tp ON a.taxpayer_id = tp.id
+        WHERE a.property_id = $1 AND a.status = 'pending'
+        ORDER BY a.created_at DESC
+      `, [propertyIdNum]);
+            // Combine both arrays
+            const combined = [...payments, ...assessments];
+            res.json(combined);
+        }
+        catch (err) {
+            console.error('Fetch property payments error:', err);
+            res.status(500).json({ error: 'Failed to fetch payment history' });
         }
     });
     app.put('/api/admin/payments/:id/date', authenticateToken, async (req, res) => {
@@ -1845,7 +1938,7 @@ async function startServer() {
             const assessments = Array.isArray(req.body) ? req.body : [req.body];
             await dbQuery('BEGIN');
             for (const assessment of assessments) {
-                const { property_id, taxpayer_id, assigned_collector_id, amount, year, basic_tax, sef_tax, interest, discount } = assessment;
+                const { property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount } = assessment;
                 // If assigned_collector_id is not provided, try to get it from the taxpayer
                 let collectorId = assigned_collector_id;
                 if (!collectorId && taxpayer_id) {
@@ -1855,11 +1948,11 @@ async function startServer() {
                         collectorId = userRes.rows[0].assigned_collector_id;
                     }
                 }
-                console.log('[DEBUG] Inserting assessment. Taxpayer:', taxpayer_id, 'Collector:', collectorId, 'Data:', { property_id, amount, year });
+                console.log('[DEBUG] Inserting assessment. Taxpayer:', taxpayer_id, 'Collector:', collectorId, 'Data:', { property_id, amount, year, assessed_value });
                 await dbQuery(`
-          INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, basic_tax, sef_tax, interest, discount, created_at, status)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        `, [property_id, taxpayer_id, collectorId, amount, year, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending']);
+          INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, created_at, status)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `, [property_id, taxpayer_id, collectorId, amount, year, assessed_value || null, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending']);
             }
             await dbQuery('COMMIT');
             res.json({ success: true });
@@ -1901,7 +1994,7 @@ async function startServer() {
         if (req.user.username.toLowerCase() !== 'manlie')
             return res.status(403).json({ error: 'Forbidden: Only Manlie can perform this action' });
         const { action, account_id } = req.body;
-        console.log('[DEBUG] Delete Account Request:', { action, account_id, user: req.user, userName: req.user.name, username: req.user.username });
+        console.log('[DEBUG] Reset/Delete Request:', { action, account_id, user: req.user, userId: req.user.id });
         try {
             await dbQuery('BEGIN');
             if (action === 'delete_account') {
@@ -1913,44 +2006,56 @@ async function startServer() {
                     await dbQuery('ROLLBACK');
                     return res.status(403).json({ error: 'Cannot delete master admin account' });
                 }
-                // Handle collector references
+                // Handle references
+                console.log(`[DELETE] Cleaning up references for user ${account_id}`);
                 await dbQuery('UPDATE users SET assigned_collector_id = NULL WHERE assigned_collector_id = $1', [account_id]);
                 await dbQuery('UPDATE assessments SET assigned_collector_id = NULL WHERE assigned_collector_id = $1', [account_id]);
                 await dbQuery('UPDATE payments SET collector_id = NULL WHERE collector_id = $1', [account_id]);
-                // Handle admin references
                 await dbQuery('DELETE FROM admin_logs WHERE admin_id = $1', [account_id]);
-                // Handle direct messages
                 await dbQuery('DELETE FROM direct_messages WHERE sender_id = $1 OR recipient_id = $1', [account_id]);
-                // Delete associated data
                 await dbQuery('DELETE FROM assessments WHERE taxpayer_id = $1', [account_id]);
                 await dbQuery('DELETE FROM payments WHERE taxpayer_id = $1', [account_id]);
                 await dbQuery('DELETE FROM property_owners WHERE user_id = $1', [account_id]);
                 await dbQuery('UPDATE properties SET owner_id = NULL, ownership_type = NULL, claimed_area = NULL WHERE owner_id = $1', [account_id]);
                 await dbQuery('DELETE FROM taxpayer_logs WHERE taxpayer_id = $1 OR user_id = $1', [account_id]);
                 // Finally delete the user
+                console.log(`[DELETE] Finally deleting user ${account_id}`);
                 await dbQuery('DELETE FROM users WHERE id = $1', [account_id]);
                 await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)', ['delete_account', `Deleted user account ID: ${account_id}`, req.user.id, new Date().toISOString()]);
             }
             else {
-                // Reset all data
+                // --- FACTORY RESET: NUKE EVERYTHING GENTLY ---
+                console.log('[RESET] Initiating full system data reset...');
+                // 1. Break self-references in users to allow deletion
+                await dbQuery('UPDATE users SET assigned_collector_id = NULL');
+                // 2. Clear transactional tables
                 await dbQuery('DELETE FROM assessments');
                 await dbQuery('DELETE FROM payments');
+                // 3. Clear property/owner tagging
                 await dbQuery('DELETE FROM property_owners');
                 await dbQuery('DELETE FROM properties');
+                // 4. Clear all logs
                 await dbQuery('DELETE FROM taxpayer_logs');
-                await dbQuery('DELETE FROM admin_logs WHERE action_type != $1', ['system_reset']);
+                await dbQuery('DELETE FROM admin_logs'); // Delete ALL logs including system_reset
                 await dbQuery('DELETE FROM direct_messages');
-                // Keep current admin
+                // 5. Clear other settings/content
+                await dbQuery('DELETE FROM messages');
+                await dbQuery('DELETE FROM inquiries');
+                await dbQuery('DELETE FROM login_patterns');
+                // 6. Delete all users except for the current session user
+                console.log(`[RESET] Deleting all users except ID ${req.user.id}`);
                 await dbQuery('DELETE FROM users WHERE id != $1', [req.user.id]);
-                await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)', ['system_reset', 'Reset all data including users', req.user.id, new Date().toISOString()]);
+                // 7. Audit log for the reset action (re-inserts after clearing)
+                await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)', ['system_reset', 'System-wide factory reset performed', req.user.id, new Date().toISOString()]);
+                console.log('[RESET] Factory reset completed successfully');
             }
             await dbQuery('COMMIT');
             res.json({ success: true });
         }
         catch (err) {
             await dbQuery('ROLLBACK');
-            console.error('Reset data error:', err);
-            res.status(500).json({ error: 'Failed to perform action' });
+            console.error('Reset/Delete data error:', err);
+            res.status(500).json({ error: 'Failed to perform action', details: err.message });
         }
     });
     app.get('/api/admin/logs', authenticateToken, async (req, res) => {
@@ -1997,6 +2102,31 @@ async function startServer() {
         catch (err) {
             console.error('Create taxpayer log error:', err);
             res.status(500).json({ error: 'Failed to create log' });
+        }
+    });
+    // Record time_out when items are removed from queue/computation
+    app.post('/api/taxpayer-log/time-out', authenticateToken, async (req, res) => {
+        if (req.user.role !== 'collector' && req.user.role !== 'admin')
+            return res.status(403).json({ error: 'Forbidden' });
+        const { taxpayer_id } = req.body;
+        if (!taxpayer_id)
+            return res.status(400).json({ error: 'taxpayer_id is required' });
+        try {
+            // Find the most recent open log for this taxpayer
+            const { rows: openLogs } = await dbQuery('SELECT id FROM taxpayer_logs WHERE taxpayer_id = $1 AND time_out IS NULL ORDER BY created_at DESC LIMIT 1', [taxpayer_id]);
+            if (openLogs.length > 0) {
+                // Close the open log
+                await dbQuery('UPDATE taxpayer_logs SET time_out = $1 WHERE id = $2', [new Date().toISOString(), openLogs[0].id]);
+                res.json({ success: true, message: 'Time out recorded' });
+            }
+            else {
+                // No open log to close, just return success
+                res.json({ success: true, message: 'No open log found' });
+            }
+        }
+        catch (err) {
+            console.error('Record taxpayer time_out error:', err);
+            res.status(500).json({ error: 'Failed to record time out' });
         }
     });
     // Messaging Routes
@@ -2280,12 +2410,15 @@ async function startServer() {
             res.status(500).json({ error: 'Failed to fetch messages' });
         }
     });
-    app.post('/api/admin/broadcast', authenticateToken, async (req, res) => {
+    app.post('/api/admin/broadcast', authenticateToken, upload.single('audio'), async (req, res) => {
         if (req.user.role !== 'admin')
             return res.status(403).json({ error: 'Forbidden' });
         const { title, body, target_role } = req.body;
+        const bodyText = body || '';
+        const audioData = req.file ? req.file.buffer.toString('base64') : null;
+        const audioMime = req.file ? req.file.mimetype : null;
         try {
-            await dbQuery('INSERT INTO messages (title, body, target_role, created_at) VALUES ($1, $2, $3, $4)', [title, body, target_role, new Date().toISOString()]);
+            await dbQuery('INSERT INTO messages (title, body, target_role, audio_data, audio_mime, created_at) VALUES ($1, $2, $3, $4, $5, $6)', [title || (audioData ? 'Audio Announcement' : 'Announcement'), bodyText, target_role, audioData, audioMime, new Date().toISOString()]);
             res.json({ success: true });
         }
         catch (err) {
@@ -2305,6 +2438,21 @@ async function startServer() {
         catch (err) {
             console.error('Fetch messages error:', err);
             res.status(500).json({ error: 'Failed to fetch messages' });
+        }
+    });
+    app.get('/api/public/announcements', async (req, res) => {
+        try {
+            const { rows } = await dbQuery(`
+        SELECT * FROM messages 
+        WHERE target_role = 'all' OR target_role = 'queue_system'
+        ORDER BY created_at DESC
+        LIMIT 10
+      `);
+            res.json(rows);
+        }
+        catch (err) {
+            console.error('Fetch public announcements error:', err);
+            res.status(500).json({ error: 'Failed to fetch announcements' });
         }
     });
     app.get('/api/direct-messages', authenticateToken, async (req, res) => {
@@ -2531,7 +2679,7 @@ async function startServer() {
     // Vite middleware for development
     if (process.env.NODE_ENV !== 'production') {
         const vite = await createViteServer({
-            server: { middlewareMode: true },
+            server: { middlewareMode: true, allowedHosts: true },
             appType: 'spa',
         });
         app.use(vite.middlewares);
@@ -2543,12 +2691,35 @@ async function startServer() {
             res.sendFile(path.join(__dirname, 'dist', 'index.html'));
         });
     }
-    app.listen(PORT, HOST, () => {
-        console.log(`[Server] Running on http://${HOST}:${PORT}`);
-        console.log(`[DB] Using Host: ${poolConfig.host || 'localhost'}`);
-        console.log(`[DB] Using Port: ${poolConfig.port || '5433'}`);
-        console.log(`[DB] Using SSL: ${process.env.DB_SSL === 'true'}`);
-        console.log(`[DB] Note: Ensure your database allows connections from the cloud environment.`);
-    });
+    // --- HTTPS via Tailscale ---
+    let useTLS = false;
+    try {
+        const certFile = fs.readFileSync(TAILSCALE_CERT);
+        const keyFile = fs.readFileSync(TAILSCALE_KEY);
+        const httpsServer = https.createServer({ cert: certFile, key: keyFile }, app);
+        httpsServer.listen(PORT, HOST, () => {
+            console.log(`[Server] Running on https://${HOST}:${PORT} (TLS enabled via Tailscale cert)`);
+            if (TAILSCALE_HOST)
+                console.log(`[Server] Accessible at https://${TAILSCALE_HOST}:${PORT}`);
+            console.log(`[DB] Using Host: ${poolConfig.host || 'localhost'}`);
+            console.log(`[DB] Using Port: ${poolConfig.port || '5433'}`);
+            console.log(`[DB] Using SSL: ${process.env.DB_SSL === 'true'}`);
+        });
+        useTLS = true;
+    }
+    catch (tlsErr) {
+        console.warn(`[Server] Could not load TLS cert/key: ${tlsErr.message}`);
+        console.warn(`[Server] Falling back to plain HTTP. To enable HTTPS run: tailscale cert <hostname>`);
+        // Fallback to plain HTTP
+        app.listen(PORT, HOST, () => {
+            console.log(`[Server] Running on http://${HOST}:${PORT} (no TLS — cert not found)`);
+            console.log(`[DB] Using Host: ${poolConfig.host || 'localhost'}`);
+            console.log(`[DB] Using Port: ${poolConfig.port || '5433'}`);
+            console.log(`[DB] Using SSL: ${process.env.DB_SSL === 'true'}`);
+        });
+    }
+    if (!useTLS) {
+        console.log('[Server] TIP: Set TAILSCALE_CERT, TAILSCALE_KEY, and TAILSCALE_HOST env vars to enable HTTPS.');
+    }
 }
 initDb().then(startServer);

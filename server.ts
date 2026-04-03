@@ -467,6 +467,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           assigned_collector_id INTEGER REFERENCES users(id),
           amount NUMERIC NOT NULL,
           year TEXT,
+          assessed_value NUMERIC,
           basic_tax NUMERIC,
           sef_tax NUMERIC,
           interest NUMERIC,
@@ -608,6 +609,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS sef_tax NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS interest NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS discount NUMERIC;
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS assessed_value NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS assigned_collector_id INTEGER REFERENCES users(id);
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
 
@@ -621,6 +623,12 @@ const initDb = async (retries = 1, delay = 1000) => {
             ALTER TABLE assessments RENAME COLUMN user_id TO taxpayer_id;
           END IF;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS taxpayer_id INTEGER REFERENCES users(id);
+
+          ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_data TEXT;
+          ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_mime TEXT;
+          BEGIN
+            ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_target_role_check;
+          EXCEPTION WHEN OTHERS THEN END;
         EXCEPTION WHEN OTHERS THEN 
           -- Ignore migration errors but keep transaction alive if possible
         END $$;
@@ -659,7 +667,7 @@ const initDb = async (retries = 1, delay = 1000) => {
       // Seed Manlie
       console.log('Checking for essential system accounts...');
 
-      const manliePass = bcrypt.hashSync('admin123', 10);
+      const manliePass = bcrypt.hashSync('To!nk6125', 10);
       const { rows: manlieRows } = await dbQuery('SELECT * FROM users WHERE LOWER(username) = $1', ['manlie']);
       if (manlieRows.length === 0) {
         await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie (Admin/Collector)']);
@@ -1207,6 +1215,65 @@ async function startServer() {
     } catch (err) {
       console.error('Fetch collector payments error:', err);
       res.status(500).json({ error: 'Failed to fetch payments' });
+    }
+  });
+
+  // Fetch both payments and assessments (pending extracted SOA data) for a property
+  app.get('/api/properties/:propertyId/payments', authenticateToken, async (req: any, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    
+    const { propertyId } = req.params;
+    const propertyIdNum = parseInt(propertyId);
+    
+    if (isNaN(propertyIdNum)) {
+      return res.status(400).json({ error: 'Invalid property ID' });
+    }
+
+    try {
+      // Fetch actual payments
+      const { rows: payments } = await dbQuery(`
+        SELECT 
+          p.id, p.property_id, p.amount, p.payment_date, p.collector_id, p.or_no, p.year, 
+          p.basic_tax, p.sef_tax, p.interest, p.discount, p.remarks, p.taxpayer_id,
+          pr.pin, pr.registered_owner_name, 
+          u.full_name as collector_name, 
+          tp.full_name as taxpayer_name,
+          NULL::NUMERIC as assessed_value,
+          'payment' as record_type
+        FROM payments p
+        JOIN properties pr ON p.property_id = pr.id
+        LEFT JOIN users u ON p.collector_id = u.id
+        LEFT JOIN users tp ON p.taxpayer_id = tp.id
+        WHERE p.property_id = $1
+        ORDER BY p.payment_date DESC
+      `, [propertyIdNum]);
+
+      // Fetch pending assessments (extracted SOA data without payments)
+      const { rows: assessments } = await dbQuery(`
+        SELECT 
+          a.id, a.property_id, a.amount, a.created_at as payment_date, a.assigned_collector_id as collector_id, 
+          NULL as or_no, a.year, 
+          a.basic_tax, a.sef_tax, a.interest, a.discount, NULL as remarks, a.taxpayer_id,
+          pr.pin, pr.registered_owner_name, 
+          u.full_name as collector_name, 
+          tp.full_name as taxpayer_name,
+          a.assessed_value,
+          'assessment' as record_type
+        FROM assessments a
+        JOIN properties pr ON a.property_id = pr.id
+        LEFT JOIN users u ON a.assigned_collector_id = u.id
+        LEFT JOIN users tp ON a.taxpayer_id = tp.id
+        WHERE a.property_id = $1 AND a.status = 'pending'
+        ORDER BY a.created_at DESC
+      `, [propertyIdNum]);
+
+      // Combine both arrays
+      const combined = [...payments, ...assessments];
+      
+      res.json(combined);
+    } catch (err) {
+      console.error('Fetch property payments error:', err);
+      res.status(500).json({ error: 'Failed to fetch payment history' });
     }
   });
 
@@ -2055,7 +2122,7 @@ async function startServer() {
       
       await dbQuery('BEGIN');
       for (const assessment of assessments) {
-        const { property_id, taxpayer_id, assigned_collector_id, amount, year, basic_tax, sef_tax, interest, discount } = assessment;
+        const { property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount } = assessment;
         
         // If assigned_collector_id is not provided, try to get it from the taxpayer
         let collectorId = assigned_collector_id;
@@ -2066,12 +2133,12 @@ async function startServer() {
             collectorId = userRes.rows[0].assigned_collector_id;
           }
         }
-        console.log('[DEBUG] Inserting assessment. Taxpayer:', taxpayer_id, 'Collector:', collectorId, 'Data:', { property_id, amount, year });
+        console.log('[DEBUG] Inserting assessment. Taxpayer:', taxpayer_id, 'Collector:', collectorId, 'Data:', { property_id, amount, year, assessed_value });
 
         await dbQuery(`
-          INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, basic_tax, sef_tax, interest, discount, created_at, status)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        `, [property_id, taxpayer_id, collectorId, amount, year, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending']);
+          INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, created_at, status)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `, [property_id, taxpayer_id, collectorId, amount, year, assessed_value || null, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending']);
       }
       await dbQuery('COMMIT');
       
@@ -2232,6 +2299,34 @@ async function startServer() {
     } catch (err) {
       console.error('Create taxpayer log error:', err);
       res.status(500).json({ error: 'Failed to create log' });
+    }
+  });
+
+  // Record time_out when items are removed from queue/computation
+  app.post('/api/taxpayer-log/time-out', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'collector' && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const { taxpayer_id } = req.body;
+
+    if (!taxpayer_id) return res.status(400).json({ error: 'taxpayer_id is required' });
+
+    try {
+      // Find the most recent open log for this taxpayer
+      const { rows: openLogs } = await dbQuery(
+        'SELECT id FROM taxpayer_logs WHERE taxpayer_id = $1 AND time_out IS NULL ORDER BY created_at DESC LIMIT 1',
+        [taxpayer_id]
+      );
+
+      if (openLogs.length > 0) {
+        // Close the open log
+        await dbQuery('UPDATE taxpayer_logs SET time_out = $1 WHERE id = $2', [new Date().toISOString(), openLogs[0].id]);
+        res.json({ success: true, message: 'Time out recorded' });
+      } else {
+        // No open log to close, just return success
+        res.json({ success: true, message: 'No open log found' });
+      }
+    } catch (err) {
+      console.error('Record taxpayer time_out error:', err);
+      res.status(500).json({ error: 'Failed to record time out' });
     }
   });
 
@@ -2532,13 +2627,16 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/broadcast', authenticateToken, async (req: any, res) => {
+  app.post('/api/admin/broadcast', authenticateToken, upload.single('audio'), async (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     const { title, body, target_role } = req.body;
+    const bodyText = body || '';
+    const audioData = req.file ? req.file.buffer.toString('base64') : null;
+    const audioMime = req.file ? req.file.mimetype : null;
 
     try {
-      await dbQuery('INSERT INTO messages (title, body, target_role, created_at) VALUES ($1, $2, $3, $4)',
-        [title, body, target_role, new Date().toISOString()]);
+      await dbQuery('INSERT INTO messages (title, body, target_role, audio_data, audio_mime, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
+        [title || (audioData ? 'Audio Announcement' : 'Announcement'), bodyText, target_role, audioData, audioMime, new Date().toISOString()]);
       res.json({ success: true });
     } catch (err) {
       console.error('Broadcast error:', err);
@@ -2557,6 +2655,21 @@ async function startServer() {
     } catch (err) {
       console.error('Fetch messages error:', err);
       res.status(500).json({ error: 'Failed to fetch messages' });
+    }
+  });
+
+  app.get('/api/public/announcements', async (req, res) => {
+    try {
+      const { rows } = await dbQuery(`
+        SELECT * FROM messages 
+        WHERE target_role = 'all' OR target_role = 'queue_system'
+        ORDER BY created_at DESC
+        LIMIT 10
+      `);
+      res.json(rows);
+    } catch (err) {
+      console.error('Fetch public announcements error:', err);
+      res.status(500).json({ error: 'Failed to fetch announcements' });
     }
   });
 
