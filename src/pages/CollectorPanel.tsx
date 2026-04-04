@@ -761,8 +761,11 @@ export default function CollectorPanel() {
     const files = Array.from(e.target.files || []) as File[];
     if (files.length === 0) return;
 
-    if (rptarSearchResults.length === 0) {
-      setRptarUploadStatus({ type: 'error', text: 'Search properties first before uploading SOAs for RPTAR.' });
+    const isSingle = files.length === 1;
+
+    // Only strictly require search results for single-file upload (matching requested behavior)
+    if (isSingle && rptarSearchResults.length === 0) {
+      setRptarUploadStatus({ type: 'error', text: 'Search properties first before uploading a single SOA for RPTAR.' });
       if (rptarPdfInputRef.current) rptarPdfInputRef.current.value = '';
       return;
     }
@@ -776,68 +779,123 @@ export default function CollectorPanel() {
       let nextSelectedPropertyId = rptarSelectedPropertyId;
 
       for (const file of files) {
-        const arrayBuffer = await file.arrayBuffer();
-        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-        const pdf = await loadingTask.promise;
-        let fullText = '';
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+          const pdf = await loadingTask.promise;
+          let fullText = '';
 
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const textContent = await page.getTextContent();
-          fullText += textContent.items.map((item: any) => (item as any).str || '').join(' ') + '\n';
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            fullText += textContent.items.map((item: any) => (item as any).str || '').join(' ') + '\n';
+          }
+
+          if (!fullText.trim()) {
+            failedMessages.push(`${file.name}: PDF contains no readable text.`);
+            continue;
+          }
+
+          const extractedSoa = extractSoaData(fullText);
+          if (extractedSoa.tdGroupedRanges.length === 0) {
+            failedMessages.push(`${file.name}: no TD#, Year, and Assessed Value rows were found.`);
+            continue;
+          }
+
+          let matchedProperty: Property | undefined;
+
+          if (isSingle) {
+            // For single upload: must match currently searched results
+            const matchedProperties = rptarSearchResults.filter(prop => getSoaMatchIssues(extractedSoa, prop).length === 0);
+            if (matchedProperties.length === 0) {
+              failedMessages.push(`${file.name}: no searched property matched the SOA fields.`);
+              continue;
+            }
+            if (matchedProperties.length > 1) {
+              failedMessages.push(`${file.name}: matched multiple properties. Narrow the search or open the exact record first.`);
+              continue;
+            }
+            matchedProperty = matchedProperties[0];
+          } else {
+            // For multiple uploads: match by PIN, Owner, Lot, and Area against ALL properties in our list
+            // (Uses strict validation but bypasses the "currently searched" results constraint)
+            const matchedProperties = properties.filter(prop => getSoaMatchIssues(extractedSoa, prop).length === 0);
+            
+            if (matchedProperties.length === 0) {
+              failedMessages.push(`${file.name}: no property record matched the SOA fields (Owner/PIN/Lot/Area).`);
+              continue;
+            }
+            
+            if (matchedProperties.length > 1) {
+              failedMessages.push(`${file.name}: matches multiple properties in the registry. Needs manual selection.`);
+              continue;
+            }
+
+            matchedProperty = matchedProperties[0];
+          }
+
+          if (matchedProperty) {
+            // Prepare assessment records for history
+            const soaRows = extractedSoa.tdGroupedRanges.map((range, index) => ({
+              id: `rptar-soa-${matchedProperty!.id}-${Date.now()}-${index}`,
+              td_no: range.tdNo,
+              year: range.startYear === range.endYear ? `${range.startYear}` : `${range.startYear}-${range.endYear}`,
+              assessed_value: range.assessedValue,
+              basic_tax: 0,
+              sef_tax: 0,
+              interest: 0,
+              discount: 0,
+              record_type: 'assessment',
+              remarks: `SOA: ${file.name}`
+            }));
+
+            // PERSIST TO DATABASE: Save to assessments table
+            const assessmentsToSave = extractedSoa.tdGroupedRanges.map(range => ({
+              property_id: matchedProperty!.id,
+              taxpayer_id: matchedProperty!.owner_id, // can be null now
+              amount: 0, // Placeholder
+              year: range.startYear === range.endYear ? `${range.startYear}` : `${range.startYear}-${range.endYear}`,
+              assessed_value: range.assessedValue,
+              basic_tax: 0,
+              sef_tax: 0,
+              interest: 0,
+              discount: 0,
+              td_no: range.tdNo
+            }));
+
+            const res = await fetch('/api/assessments', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(assessmentsToSave)
+            });
+
+            if (!res.ok) {
+              const errorData = await res.json().catch(() => ({}));
+              failedMessages.push(`${file.name}: Database error (${errorData.error || res.statusText})`);
+              continue;
+            }
+
+            // Successfully matched AND saved
+            if (!uploadsByProperty[matchedProperty.id]) {
+              uploadsByProperty[matchedProperty.id] = [];
+            }
+
+            uploadsByProperty[matchedProperty.id].push({
+              fileName: file.name,
+              summary: extractedSoa,
+              rows: soaRows
+            });
+
+            if (!nextSelectedPropertyId) {
+              nextSelectedPropertyId = matchedProperty.id;
+            }
+
+            matchedMessages.push(`${file.name} -> ${matchedProperty.registered_owner_name} (${matchedProperty.pin})`);
+          }
+        } catch (fileErr) {
+          console.error(`Error processing file ${file.name}:`, fileErr);
+          failedMessages.push(`${file.name}: processing error.`);
         }
-
-        if (!fullText.trim()) {
-          failedMessages.push(`${file.name}: PDF contains no readable text.`);
-          continue;
-        }
-
-        const extractedSoa = extractSoaData(fullText);
-        if (extractedSoa.tdGroupedRanges.length === 0) {
-          failedMessages.push(`${file.name}: no TD#, Year, and Assessed Value rows were found.`);
-          continue;
-        }
-
-        const matchedProperties = rptarSearchResults.filter(prop => getSoaMatchIssues(extractedSoa, prop).length === 0);
-        if (matchedProperties.length === 0) {
-          failedMessages.push(`${file.name}: no searched property matched the SOA fields.`);
-          continue;
-        }
-
-        if (matchedProperties.length > 1) {
-          failedMessages.push(`${file.name}: matched multiple properties. Narrow the search or open the exact record first.`);
-          continue;
-        }
-
-        const matchedProperty = matchedProperties[0];
-        const soaRows = extractedSoa.tdGroupedRanges.map((range, index) => ({
-          id: `rptar-soa-${matchedProperty.id}-${Date.now()}-${index}`,
-          td_no: range.tdNo,
-          year: range.startYear === range.endYear ? `${range.startYear}` : `${range.startYear}-${range.endYear}`,
-          assessed_value: range.assessedValue,
-          basic_tax: 0,
-          sef_tax: 0,
-          interest: 0,
-          discount: 0,
-          record_type: 'assessment',
-          remarks: `SOA: ${file.name}`
-        }));
-
-        if (!uploadsByProperty[matchedProperty.id]) {
-          uploadsByProperty[matchedProperty.id] = [];
-        }
-
-        uploadsByProperty[matchedProperty.id].push({
-          fileName: file.name,
-          summary: extractedSoa,
-          rows: soaRows
-        });
-
-        if (!nextSelectedPropertyId) {
-          nextSelectedPropertyId = matchedProperty.id;
-        }
-
-        matchedMessages.push(`${file.name} -> ${matchedProperty.registered_owner_name} (${matchedProperty.pin})`);
       }
 
       if (Object.keys(uploadsByProperty).length > 0) {
@@ -858,24 +916,30 @@ export default function CollectorPanel() {
       if (matchedMessages.length > 0 && failedMessages.length === 0) {
         setRptarUploadStatus({
           type: 'success',
-          text: `${matchedMessages.length} SOA file${matchedMessages.length === 1 ? '' : 's'} matched and added to account history.`
+          text: `Success: ${matchedMessages.length} file(s) saved to account history.`
         });
       } else if (matchedMessages.length > 0) {
         setRptarUploadStatus({
           type: 'success',
-          text: `${matchedMessages.length} SOA file${matchedMessages.length === 1 ? '' : 's'} added. ${failedMessages.length} file${failedMessages.length === 1 ? '' : 's'} need review.`
+          text: `Matched: ${matchedMessages.length} file(s) saved. Failed: ${failedMessages.length} file(s).`
         });
       } else {
         setRptarUploadStatus({
           type: 'error',
-          text: failedMessages[0] || 'No SOA files could be matched to the current search results.'
+          text: failedMessages.length > 0 ? failedMessages[0] : 'No valid files processed.'
         });
       }
+
+      // If failures exist, alert them (since status bar might only show the first)
+      if (failedMessages.length > 0) {
+        console.warn('RPTAR Processing Failures:', failedMessages);
+      }
+
     } catch (err) {
       console.error('RPTAR PDF processing error:', err);
       setRptarUploadStatus({
         type: 'error',
-        text: 'Failed to process one or more SOA files for RPTAR. Please make sure they are valid PDF documents.'
+        text: 'Failed to process SOA files. Please check the console for details.'
       });
     } finally {
       setIsRptarPdfProcessing(false);

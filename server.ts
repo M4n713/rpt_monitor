@@ -547,7 +547,7 @@ const initDb = async (retries = 1, delay = 1000) => {
         CREATE TABLE IF NOT EXISTS assessments (
           id SERIAL PRIMARY KEY,
           property_id INTEGER NOT NULL REFERENCES properties(id),
-          taxpayer_id INTEGER NOT NULL REFERENCES users(id),
+          taxpayer_id INTEGER REFERENCES users(id),
           assigned_collector_id INTEGER REFERENCES users(id),
           amount NUMERIC NOT NULL,
           year TEXT,
@@ -588,7 +588,7 @@ const initDb = async (retries = 1, delay = 1000) => {
 
         CREATE TABLE IF NOT EXISTS taxpayer_logs (
           id SERIAL PRIMARY KEY,
-          taxpayer_id INTEGER NOT NULL REFERENCES users(id),
+          taxpayer_id INTEGER REFERENCES users(id),
           taxpayer_name TEXT NOT NULL,
           role TEXT NOT NULL CHECK(role IN ('admin', 'collector')),
           user_id INTEGER NOT NULL REFERENCES users(id),
@@ -753,6 +753,7 @@ const initDb = async (retries = 1, delay = 1000) => {
             ALTER TABLE assessments RENAME COLUMN user_id TO taxpayer_id;
           END IF;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS taxpayer_id INTEGER REFERENCES users(id);
+          ALTER TABLE assessments ALTER COLUMN taxpayer_id DROP NOT NULL;
 
           ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_data TEXT;
           ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_mime TEXT;
@@ -2337,7 +2338,7 @@ async function startServer() {
         await dbQuery(`
           INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, created_at, status, td_no)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-        `, [property_id, taxpayer_id, collectorId, amount, year, assessed_value || null, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending', td_no]);
+        `, [property_id, taxpayer_id || null, collectorId || null, amount, year, assessed_value || null, basic_tax || 0, sef_tax || 0, interest || 0, discount || 0, new Date().toISOString(), 'pending', td_no]);
       }
       await dbQuery('COMMIT');
       
