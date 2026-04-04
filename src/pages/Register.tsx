@@ -9,17 +9,30 @@ import { Link } from 'react-router-dom';
 export default function Register() {
   const [username, setUsername] = useState('');
   const [fullName, setFullName] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const { login } = useAuth();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+
     try {
       const res = await fetch('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, full_name: fullName }),
+        body: JSON.stringify({ username, full_name: fullName, password }),
       });
       
       if (res.ok) {
@@ -61,6 +74,14 @@ export default function Register() {
               <div className="flex flex-col space-y-1.5">
                 <Label htmlFor="username">Username</Label>
                 <Input id="username" value={username} onChange={(e) => setUsername(e.target.value)} required />
+              </div>
+              <div className="flex flex-col space-y-1.5">
+                <Label htmlFor="password">Password</Label>
+                <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+              </div>
+              <div className="flex flex-col space-y-1.5">
+                <Label htmlFor="confirm-password">Confirm Password</Label>
+                <Input id="confirm-password" type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required />
               </div>
             </div>
             {error && <p className="text-red-500 text-sm mt-2">{error}</p>}

@@ -14,6 +14,7 @@ import { Readable } from 'stream';
 import csvParser from 'csv-parser';
 import fs from 'fs';
 import https from 'https';
+import { DEFAULT_COMPUTATION_RULES } from './src/lib/rptComputation.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let cachedBarangays = [];
 const updateBarangayCache = async () => {
@@ -538,6 +539,21 @@ const initDb = async (retries = 1, delay = 1000) => {
           name TEXT NOT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS custom_computation_types (
+          id SERIAL PRIMARY KEY,
+          label TEXT NOT NULL,
+          value TEXT UNIQUE NOT NULL,
+          base_type TEXT NOT NULL CHECK(base_type IN ('standard', 'rpvara', 'denr', 'share')),
+          description TEXT,
+          special_case_hook TEXT NOT NULL DEFAULT 'none',
+          effective_from DATE,
+          effective_to DATE,
+          config JSONB NOT NULL DEFAULT '{}'::jsonb,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
       `);
             // Alter taxpayer_logs to allow NULL time_out
             await dbQuery(`
@@ -546,11 +562,36 @@ const initDb = async (retries = 1, delay = 1000) => {
             await dbQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS login_level INTEGER DEFAULT 1;
       `).catch(e => console.log('Alter table users login_level failed:', e.message));
+            await dbQuery(`
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS special_case_hook TEXT NOT NULL DEFAULT 'none';
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS effective_from DATE;
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS effective_to DATE;
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}'::jsonb;
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS is_builtin BOOLEAN NOT NULL DEFAULT FALSE;
+      `).catch(e => console.log('Alter table custom_computation_types failed:', e.message));
+            for (const rule of DEFAULT_COMPUTATION_RULES) {
+                await dbQuery(`INSERT INTO custom_computation_types
+            (label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)
+           ON CONFLICT (value) DO NOTHING`, [
+                    rule.label,
+                    rule.value,
+                    rule.base_type,
+                    rule.description || null,
+                    rule.special_case_hook,
+                    rule.effective_from || null,
+                    rule.effective_to || null,
+                    JSON.stringify(rule.config || {}),
+                    rule.is_active !== false,
+                    true
+                ]).catch(e => console.log(`Seed computation rule ${rule.value} failed:`, e.message));
+            }
             // Robust column migrations using DO blocks to prevent transaction poisoning
             await dbQuery(`
         DO $$ 
         BEGIN 
           -- Ensure payments columns
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS td_no TEXT;
           ALTER TABLE payments ADD COLUMN IF NOT EXISTS basic_tax NUMERIC;
           ALTER TABLE payments ADD COLUMN IF NOT EXISTS sef_tax NUMERIC;
           ALTER TABLE payments ADD COLUMN IF NOT EXISTS interest NUMERIC;
@@ -560,6 +601,7 @@ const initDb = async (retries = 1, delay = 1000) => {
           ALTER TABLE payments ALTER COLUMN collector_id DROP NOT NULL;
 
           -- Ensure assessments columns
+          ALTER TABLE assessments ADD COLUMN IF NOT EXISTS td_no TEXT;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS basic_tax NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS sef_tax NUMERIC;
           ALTER TABLE assessments ADD COLUMN IF NOT EXISTS interest NUMERIC;
@@ -621,10 +663,10 @@ const initDb = async (retries = 1, delay = 1000) => {
             const manliePass = bcrypt.hashSync('To!nk6125', 10);
             const { rows: manlieRows } = await dbQuery('SELECT * FROM users WHERE LOWER(username) = $1', ['manlie']);
             if (manlieRows.length === 0) {
-                await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie (Admin/Collector)']);
+                await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie C. Ocang']);
             }
             else {
-                await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [manliePass, 'admin', 'Manlie (Admin/Collector)', 'manlie']);
+                await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [manliePass, 'admin', 'Manlie C. Ocang', 'manlie']);
             }
             // Seed Treas
             const treasPass = bcrypt.hashSync('Treas123', 10);
@@ -1135,7 +1177,7 @@ async function startServer() {
             const { rows: payments } = await dbQuery(`
         SELECT 
           p.id, p.property_id, p.amount, p.payment_date, p.collector_id, p.or_no, p.year, 
-          p.basic_tax, p.sef_tax, p.interest, p.discount, p.remarks, p.taxpayer_id,
+          p.basic_tax, p.sef_tax, p.interest, p.discount, p.remarks, p.taxpayer_id, p.td_no,
           pr.pin, pr.registered_owner_name, 
           u.full_name as collector_name, 
           tp.full_name as taxpayer_name,
@@ -1153,7 +1195,7 @@ async function startServer() {
         SELECT 
           a.id, a.property_id, a.amount, a.created_at as payment_date, a.assigned_collector_id as collector_id, 
           NULL as or_no, a.year, 
-          a.basic_tax, a.sef_tax, a.interest, a.discount, NULL as remarks, a.taxpayer_id,
+          a.basic_tax, a.sef_tax, a.interest, a.discount, NULL as remarks, a.taxpayer_id, a.td_no,
           pr.pin, pr.registered_owner_name, 
           u.full_name as collector_name, 
           tp.full_name as taxpayer_name,
@@ -1344,9 +1386,18 @@ async function startServer() {
         if (!req.file)
             return res.status(400).json({ error: 'No file uploaded' });
         const results = [];
+        // Detect potential separator in first line
+        const firstLine = req.file.buffer.toString().split('\n')[0];
+        let separator = ',';
+        if (firstLine.includes(';'))
+            separator = ';';
+        else if (firstLine.includes('\t'))
+            separator = '\t';
+        console.log('[DEBUG-ABSTRACT] Auto-detected CSV separator:', { separator });
         const stream = Readable.from(req.file.buffer.toString());
         stream
             .pipe(csvParser({
+            separator,
             mapHeaders: ({ header }) => header.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
         }))
             .on('data', (data) => results.push(data))
@@ -1429,7 +1480,7 @@ async function startServer() {
               id SERIAL PRIMARY KEY,
               owner_id INTEGER REFERENCES users(id),
               registered_owner_name TEXT,
-              pin TEXT UNIQUE,
+              pin TEXT,
               td_no TEXT,
               lot_no TEXT,
               address TEXT,
@@ -1526,19 +1577,6 @@ async function startServer() {
                   taxability, effectivity, remarks
                 ) 
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                ON CONFLICT (pin) DO UPDATE SET
-                  td_no = EXCLUDED.td_no,
-                  registered_owner_name = EXCLUDED.registered_owner_name,
-                  lot_no = EXCLUDED.lot_no,
-                  total_area = EXCLUDED.total_area,
-                  assessed_value = EXCLUDED.assessed_value,
-                  kind = EXCLUDED.kind,
-                  classification = EXCLUDED.classification,
-                  old_pin = EXCLUDED.old_pin,
-                  status = EXCLUDED.status,
-                  taxability = EXCLUDED.taxability,
-                  effectivity = EXCLUDED.effectivity,
-                  remarks = EXCLUDED.remarks
               `, [
                             pin, tdNo, registeredOwner, lotNo, area,
                             assessedVal, kind, classification, oldPin, status || '',
@@ -1713,9 +1751,7 @@ async function startServer() {
             return res.status(403).json({ error: 'Forbidden' });
         try {
             const { rows } = await dbQuery(`
-        SELECT id, username, full_name, last_active_at FROM users WHERE role = 'collector'
-        UNION
-        SELECT id, username, full_name, last_active_at FROM users WHERE LOWER(username) = 'manlie'
+        SELECT id, username, full_name, last_active_at FROM users WHERE role = 'collector' OR role = 'admin'
         ORDER BY full_name ASC
       `);
             res.json(rows);
@@ -1810,7 +1846,7 @@ async function startServer() {
     app.post('/api/payment', authenticateToken, async (req, res) => {
         if (req.user.role !== 'collector' && req.user.role !== 'admin')
             return res.status(403).json({ error: 'Forbidden' });
-        const { property_id, amount, or_no, year, basic_tax, sef_tax, interest, discount, remarks } = req.body;
+        const { property_id, amount, or_no, year, basic_tax, sef_tax, interest, discount, remarks, td_no } = req.body;
         try {
             console.log(`[API PAYMENT] Start. Body:`, JSON.stringify(req.body));
             await dbQuery('BEGIN');
@@ -1835,11 +1871,11 @@ async function startServer() {
             const sanitizedInterest = cleanNum(interest);
             const sanitizedDiscount = cleanNum(discount);
             // Record payment
-            const paymentParams = [property_id, property.owner_id, sanitizedAmount, new Date().toISOString(), req.user.id, or_no, year, sanitizedBasic, sanitizedSef, sanitizedInterest, sanitizedDiscount, remarks];
+            const paymentParams = [property_id, property.owner_id, sanitizedAmount, new Date().toISOString(), req.user.id, or_no, year, sanitizedBasic, sanitizedSef, sanitizedInterest, sanitizedDiscount, remarks, td_no];
             console.log(`[API PAYMENT] Inserting payment. Sanitized Params:`, paymentParams);
             await dbQuery(`
-        INSERT INTO payments (property_id, taxpayer_id, amount, payment_date, collector_id, or_no, year, basic_tax, sef_tax, interest, discount, remarks)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO payments (property_id, taxpayer_id, amount, payment_date, collector_id, or_no, year, basic_tax, sef_tax, interest, discount, remarks, td_no)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       `, paymentParams);
             console.log(`[API PAYMENT] Payment recorded`);
             // TAXPAYER LOGGING: Time Out (Commit)
@@ -1907,7 +1943,7 @@ async function startServer() {
             return res.status(403).json({ error: 'Forbidden' });
         try {
             let query = `
-        SELECT a.*, p.pin, p.registered_owner_name, p.lot_no, p.td_no, p.assessed_value as property_assessed_value, p.address, p.description, p.total_area
+        SELECT a.*, p.pin, p.registered_owner_name, p.lot_no, p.td_no as property_td_no, p.assessed_value as property_assessed_value, p.address, p.description, p.total_area
         FROM assessments a
         JOIN properties p ON a.property_id = p.id
         WHERE (a.status = 'pending' OR a.status IS NULL)
@@ -1938,7 +1974,7 @@ async function startServer() {
             const assessments = Array.isArray(req.body) ? req.body : [req.body];
             await dbQuery('BEGIN');
             for (const assessment of assessments) {
-                const { property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount } = assessment;
+                const { property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, td_no } = assessment;
                 // If assigned_collector_id is not provided, try to get it from the taxpayer
                 let collectorId = assigned_collector_id;
                 if (!collectorId && taxpayer_id) {
@@ -1948,11 +1984,11 @@ async function startServer() {
                         collectorId = userRes.rows[0].assigned_collector_id;
                     }
                 }
-                console.log('[DEBUG] Inserting assessment. Taxpayer:', taxpayer_id, 'Collector:', collectorId, 'Data:', { property_id, amount, year, assessed_value });
+                console.log('[DEBUG] Inserting assessment. Taxpayer:', taxpayer_id, 'Collector:', collectorId, 'Data:', { property_id, amount, year, assessed_value, td_no });
                 await dbQuery(`
-          INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, created_at, status)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        `, [property_id, taxpayer_id, collectorId, amount, year, assessed_value || null, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending']);
+          INSERT INTO assessments (property_id, taxpayer_id, assigned_collector_id, amount, year, assessed_value, basic_tax, sef_tax, interest, discount, created_at, status, td_no)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        `, [property_id, taxpayer_id, collectorId, amount, year, assessed_value || null, basic_tax, sef_tax, interest, discount, new Date().toISOString(), 'pending', td_no]);
             }
             await dbQuery('COMMIT');
             res.json({ success: true });
@@ -2255,6 +2291,126 @@ async function startServer() {
         catch (err) {
             console.error('Delete barangay error:', err);
             res.status(500).json({ error: 'Failed to delete barangay' });
+        }
+    });
+    app.get('/api/admin/computation-types', authenticateToken, async (_req, res) => {
+        try {
+            const { rows } = await dbQuery(`SELECT id, label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin, created_at
+         FROM custom_computation_types
+         ORDER BY is_builtin DESC, created_at ASC, id ASC`);
+            res.json(rows);
+        }
+        catch (err) {
+            console.error('Fetch custom computation types error:', err);
+            res.status(500).json({ error: 'Failed to fetch custom computation types' });
+        }
+    });
+    app.post('/api/admin/computation-types', authenticateToken, async (req, res) => {
+        if (req.user.username.toLowerCase() !== 'manlie')
+            return res.status(403).json({ error: 'Forbidden' });
+        const { label, base_type, description, special_case_hook, effective_from, effective_to, config, is_active } = req.body || {};
+        if (!label || !base_type)
+            return res.status(400).json({ error: 'Missing label or base type' });
+        if (!['standard', 'rpvara', 'denr', 'share'].includes(base_type)) {
+            return res.status(400).json({ error: 'Invalid base type' });
+        }
+        if (!['none', 'rpvara_2024_half', 'denr_10_year_window'].includes(special_case_hook || 'none')) {
+            return res.status(400).json({ error: 'Invalid special case hook' });
+        }
+        try {
+            const baseValue = String(label)
+                .trim()
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '')
+                .slice(0, 40) || `custom-${Date.now()}`;
+            let candidateValue = `custom-${baseValue}`;
+            let counter = 1;
+            while (true) {
+                const existing = await dbQuery('SELECT id FROM custom_computation_types WHERE value = $1', [candidateValue]);
+                if (existing.rows.length === 0)
+                    break;
+                counter += 1;
+                candidateValue = `custom-${baseValue}-${counter}`;
+            }
+            const { rows } = await dbQuery(`INSERT INTO custom_computation_types
+          (label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, FALSE)
+         RETURNING id, label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin, created_at`, [
+                String(label).trim(),
+                candidateValue,
+                base_type,
+                description ? String(description).trim() : null,
+                special_case_hook || 'none',
+                effective_from || null,
+                effective_to || null,
+                JSON.stringify(config || {}),
+                is_active !== false
+            ]);
+            res.status(201).json(rows[0]);
+        }
+        catch (err) {
+            console.error('Create custom computation type error:', err);
+            res.status(500).json({ error: 'Failed to create custom computation type' });
+        }
+    });
+    app.delete('/api/admin/computation-types/:id', authenticateToken, async (req, res) => {
+        if (req.user.username.toLowerCase() !== 'manlie')
+            return res.status(403).json({ error: 'Forbidden' });
+        try {
+            const existing = await dbQuery('SELECT is_builtin FROM custom_computation_types WHERE id = $1', [req.params.id]);
+            if (existing.rows[0]?.is_builtin) {
+                return res.status(400).json({ error: 'Built-in computation rules cannot be deleted. Edit or deactivate them instead.' });
+            }
+            await dbQuery('DELETE FROM custom_computation_types WHERE id = $1', [req.params.id]);
+            res.json({ success: true });
+        }
+        catch (err) {
+            console.error('Delete custom computation type error:', err);
+            res.status(500).json({ error: 'Failed to delete custom computation type' });
+        }
+    });
+    app.put('/api/admin/computation-types/:id', authenticateToken, async (req, res) => {
+        if (req.user.username.toLowerCase() !== 'manlie')
+            return res.status(403).json({ error: 'Forbidden' });
+        const { label, base_type, description, special_case_hook, effective_from, effective_to, config, is_active } = req.body || {};
+        if (!label || !base_type)
+            return res.status(400).json({ error: 'Missing label or base type' });
+        if (!['standard', 'rpvara', 'denr', 'share'].includes(base_type)) {
+            return res.status(400).json({ error: 'Invalid base type' });
+        }
+        if (!['none', 'rpvara_2024_half', 'denr_10_year_window'].includes(special_case_hook || 'none')) {
+            return res.status(400).json({ error: 'Invalid special case hook' });
+        }
+        try {
+            const { rows } = await dbQuery(`UPDATE custom_computation_types
+         SET label = $1,
+             base_type = $2,
+             description = $3,
+             special_case_hook = $4,
+             effective_from = $5,
+             effective_to = $6,
+             config = $7::jsonb,
+             is_active = $8
+         WHERE id = $9
+         RETURNING id, label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin, created_at`, [
+                String(label).trim(),
+                base_type,
+                description ? String(description).trim() : null,
+                special_case_hook || 'none',
+                effective_from || null,
+                effective_to || null,
+                JSON.stringify(config || {}),
+                is_active !== false,
+                req.params.id
+            ]);
+            if (!rows[0])
+                return res.status(404).json({ error: 'Computation type not found' });
+            res.json(rows[0]);
+        }
+        catch (err) {
+            console.error('Update custom computation type error:', err);
+            res.status(500).json({ error: 'Failed to update custom computation type' });
         }
     });
     app.get('/api/admin/delinquency-report', authenticateToken, async (req, res) => {

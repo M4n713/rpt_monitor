@@ -14,8 +14,29 @@ import { Readable } from 'stream';
 import csvParser from 'csv-parser';
 import fs from 'fs';
 import https from 'https';
+import { randomBytes } from 'crypto';
+import { DEFAULT_COMPUTATION_RULES } from './src/lib/rptComputation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.resolve(__dirname, '.env') });
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+const getJwtSecret = () => {
+  const configuredSecret = process.env.JWT_SECRET?.trim();
+  if (configuredSecret) return configuredSecret;
+  if (isProduction) {
+    throw new Error('Missing required environment variable: JWT_SECRET');
+  }
+
+  const ephemeralSecret = randomBytes(32).toString('hex');
+  console.warn('[SECURITY] JWT_SECRET is not set. Using an ephemeral development secret for this process only.');
+  return ephemeralSecret;
+};
+
+const generateTemporaryPassword = () => {
+  return randomBytes(9).toString('base64url');
+};
 
 let cachedBarangays: { code: string, name: string }[] = [];
 
@@ -65,8 +86,7 @@ const getLocationFromPin = (pin: string) => {
 };
 
 // --- SEMAPHORE SMS API CONFIGURATION ---
-// Using API Key: 4c1082647be5c07e8019fbce60d45d2b
-const SEMAPHORE_API_KEY = process.env.SEMAPHORE_API_KEY || '4c1082647be5c07e8019fbce60d45d2b'; 
+const SEMAPHORE_API_KEY = process.env.SEMAPHORE_API_KEY?.trim() || '';
 const SEMAPHORE_SENDER_NAME = process.env.SEMAPHORE_SENDER_NAME || ''; // Optional: set if you have an approved sender name
 
 const TELCO_PREFIXES = {
@@ -90,6 +110,10 @@ const getTelco = (phone: string) => {
 
 const sendSMS = async (to: string, message: string) => {
   if (!to || !message) return;
+  if (!SEMAPHORE_API_KEY) {
+    console.warn('[SEMAPHORE] SMS skipped because SEMAPHORE_API_KEY is not configured.');
+    return false;
+  }
   
   const formattedPhone = to.startsWith('09') ? to : (to.startsWith('63') ? '0' + to.substring(2) : to);
   const telco = getTelco(formattedPhone);
@@ -125,8 +149,7 @@ const sendSMS = async (to: string, message: string) => {
     return false;
   }
 };
-dotenv.config({ path: path.resolve(__dirname, '.env') });
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-key-change-in-prod';
+const JWT_SECRET = getJwtSecret();
 
 // Initialize PostgreSQL Pool
 const getPoolConfig = () => {
@@ -145,7 +168,7 @@ const getPoolConfig = () => {
         user: process.env.DB_USER || 'postgres',
         host: process.env.DB_HOST || 'localhost',
         database: process.env.DB_NAME || 'rpt_monitor_data',
-        password: process.env.DB_PASSWORD || 'To!nk6125',
+        password: process.env.DB_PASSWORD,
         port: parseInt(process.env.DB_PORT || '5433'),
       };
 
@@ -317,6 +340,67 @@ const dbQuery = async (text: string | { text: string, timeout?: number }, params
   }
   
   return await pool.query(text, params);
+};
+
+const canAccessProperty = async (user: any, propertyId: number) => {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+
+  if (user.role === 'taxpayer') {
+    const { rows } = await dbQuery(
+      'SELECT 1 FROM property_owners WHERE property_id = $1 AND user_id = $2 LIMIT 1',
+      [propertyId, user.id]
+    );
+    return rows.length > 0;
+  }
+
+  if (user.role === 'collector') {
+    const { rows } = await dbQuery(
+      `SELECT 1
+       FROM property_owners po
+       JOIN users u ON u.id = po.user_id
+       WHERE po.property_id = $1 AND u.assigned_collector_id = $2
+       LIMIT 1`,
+      [propertyId, user.id]
+    );
+    return rows.length > 0;
+  }
+
+  return false;
+};
+
+const getAuthorizedPropertiesByPins = async (user: any, pins: string[]) => {
+  if (!user || pins.length === 0) return [];
+
+  if (user.role === 'admin') {
+    const { rows } = await dbQuery('SELECT * FROM properties WHERE pin = ANY($1)', [pins]);
+    return rows;
+  }
+
+  if (user.role === 'collector') {
+    const { rows } = await dbQuery(
+      `SELECT DISTINCT p.*
+       FROM properties p
+       JOIN property_owners po ON po.property_id = p.id
+       JOIN users u ON u.id = po.user_id
+       WHERE p.pin = ANY($1) AND u.assigned_collector_id = $2`,
+      [pins, user.id]
+    );
+    return rows;
+  }
+
+  if (user.role === 'taxpayer') {
+    const { rows } = await dbQuery(
+      `SELECT DISTINCT p.*
+       FROM properties p
+       JOIN property_owners po ON po.property_id = p.id
+       WHERE p.pin = ANY($1) AND po.user_id = $2`,
+      [pins, user.id]
+    );
+    return rows;
+  }
+
+  return [];
 };
 
 // Log connection attempt with more detail
@@ -580,6 +664,21 @@ const initDb = async (retries = 1, delay = 1000) => {
           name TEXT NOT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS custom_computation_types (
+          id SERIAL PRIMARY KEY,
+          label TEXT NOT NULL,
+          value TEXT UNIQUE NOT NULL,
+          base_type TEXT NOT NULL CHECK(base_type IN ('standard', 'rpvara', 'denr', 'share')),
+          description TEXT,
+          special_case_hook TEXT NOT NULL DEFAULT 'none',
+          effective_from DATE,
+          effective_to DATE,
+          config JSONB NOT NULL DEFAULT '{}'::jsonb,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
       `);
 
       // Alter taxpayer_logs to allow NULL time_out
@@ -590,6 +689,35 @@ const initDb = async (retries = 1, delay = 1000) => {
       await dbQuery(`
         ALTER TABLE users ADD COLUMN IF NOT EXISTS login_level INTEGER DEFAULT 1;
       `).catch(e => console.log('Alter table users login_level failed:', e.message));
+
+      await dbQuery(`
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS special_case_hook TEXT NOT NULL DEFAULT 'none';
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS effective_from DATE;
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS effective_to DATE;
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}'::jsonb;
+        ALTER TABLE custom_computation_types ADD COLUMN IF NOT EXISTS is_builtin BOOLEAN NOT NULL DEFAULT FALSE;
+      `).catch(e => console.log('Alter table custom_computation_types failed:', e.message));
+
+      for (const rule of DEFAULT_COMPUTATION_RULES) {
+        await dbQuery(
+          `INSERT INTO custom_computation_types
+            (label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)
+           ON CONFLICT (value) DO NOTHING`,
+          [
+            rule.label,
+            rule.value,
+            rule.base_type,
+            rule.description || null,
+            rule.special_case_hook,
+            rule.effective_from || null,
+            rule.effective_to || null,
+            JSON.stringify(rule.config || {}),
+            rule.is_active !== false,
+            true
+          ]
+        ).catch(e => console.log(`Seed computation rule ${rule.value} failed:`, e.message));
+      }
 
       // Robust column migrations using DO blocks to prevent transaction poisoning
       await dbQuery(`
@@ -636,15 +764,7 @@ const initDb = async (retries = 1, delay = 1000) => {
         END $$;
       `);
 
-      // Ensure properties properties_pin_key UNIQUE (pin)
-      await dbQuery(`
-        DO $$
-        BEGIN
-          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'properties_pin_key') THEN
-            ALTER TABLE properties ADD CONSTRAINT properties_pin_key UNIQUE (pin);
-          END IF;
-        EXCEPTION WHEN OTHERS THEN END $$;
-      `);
+      await dbQuery('ALTER TABLE properties DROP CONSTRAINT IF EXISTS properties_pin_key').catch(() => {});
       await dbQuery('ALTER TABLE properties DROP CONSTRAINT IF EXISTS properties_status_check').catch(() => {});
 
       // Seed Barangays
@@ -669,21 +789,31 @@ const initDb = async (retries = 1, delay = 1000) => {
       // Seed Manlie
       console.log('Checking for essential system accounts...');
 
-      const manliePass = bcrypt.hashSync('To!nk6125', 10);
+      const manlieSeedPassword = process.env.SEED_ADMIN_PASSWORD?.trim();
       const { rows: manlieRows } = await dbQuery('SELECT * FROM users WHERE LOWER(username) = $1', ['manlie']);
       if (manlieRows.length === 0) {
-        await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie C. Ocang']);
+        if (manlieSeedPassword) {
+          const manliePass = bcrypt.hashSync(manlieSeedPassword, 10);
+          await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['manlie', manliePass, 'admin', 'Manlie C. Ocang']);
+        } else {
+          console.warn('[SECURITY] Skipping seeded admin account creation because SEED_ADMIN_PASSWORD is not configured.');
+        }
       } else {
-        await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [manliePass, 'admin', 'Manlie C. Ocang', 'manlie']);
+        await dbQuery('UPDATE users SET role = $1, full_name = $2 WHERE LOWER(username) = $3', ['admin', 'Manlie C. Ocang', 'manlie']);
       }
 
       // Seed Treas
-      const treasPass = bcrypt.hashSync('Treas123', 10);
+      const treasSeedPassword = process.env.SEED_QUEUE_PASSWORD?.trim();
       const { rows: treasRows } = await dbQuery('SELECT * FROM users WHERE LOWER(username) = $1', ['treas']);
       if (treasRows.length === 0) {
-        await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['treas', treasPass, 'queue', 'Treasurer Queue Kiosk']);
+        if (treasSeedPassword) {
+          const treasPass = bcrypt.hashSync(treasSeedPassword, 10);
+          await dbQuery('INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4)', ['treas', treasPass, 'queue', 'Treasurer Queue Kiosk']);
+        } else {
+          console.warn('[SECURITY] Skipping seeded queue account creation because SEED_QUEUE_PASSWORD is not configured.');
+        }
       } else {
-        await dbQuery('UPDATE users SET password = $1, role = $2, full_name = $3 WHERE LOWER(username) = $4', [treasPass, 'queue', 'Treasurer Queue Kiosk', 'treas']);
+        await dbQuery('UPDATE users SET role = $1, full_name = $2 WHERE LOWER(username) = $3', ['queue', 'Treasurer Queue Kiosk', 'treas']);
       }
 
 
@@ -756,9 +886,7 @@ async function startServer() {
       if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.ts.net')) {
         callback(null, true);
       } else {
-        // Fallback: reflect the origin to allow it for now, 
-        // to prevent CORS issues on this internal tool.
-        callback(null, true);
+        callback(new Error('Not allowed by CORS'));
       }
     },
     credentials: true
@@ -922,24 +1050,14 @@ async function startServer() {
         return res.status(400).json({ error: 'User ID and role are required' });
       }
 
-      // Determine default password based on role
-      let defaultPassword: string;
-      switch (role) {
-        case 'admin':
-          defaultPassword = 'admin123';
-          break;
-        case 'collector':
-          defaultPassword = 'collector123';
-          break;
-        case 'taxpayer':
-          defaultPassword = 'taxpayer123';
-          break;
-        default:
-          return res.status(400).json({ error: 'Invalid role' });
+      if (!['admin', 'collector', 'taxpayer'].includes(role)) {
+        return res.status(400).json({ error: 'Invalid role' });
       }
 
+      const temporaryPassword = generateTemporaryPassword();
+
       // Hash and update the password
-      const hashedPassword = bcrypt.hashSync(defaultPassword, 10);
+      const hashedPassword = bcrypt.hashSync(temporaryPassword, 10);
       const result = await dbQuery('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
 
       if (result.rowCount === 0) {
@@ -947,9 +1065,9 @@ async function startServer() {
       }
 
       await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)',
-        ['user_management', `Reset password for user ID ${userId} to default`, req.user.id, new Date().toISOString()]);
+        ['user_management', `Reset password for user ID ${userId}`, req.user.id, new Date().toISOString()]);
 
-      res.json({ success: true, message: `Password reset to default ${defaultPassword}` });
+      res.json({ success: true, message: 'Password reset successfully', temporaryPassword });
     } catch (err) {
       console.error('Reset password error:', err);
       res.status(500).json({ error: 'Internal server error' });
@@ -957,24 +1075,35 @@ async function startServer() {
   });
 
   app.post('/api/register', async (req, res) => {
-    const { username, full_name } = req.body;
+    const { username, full_name, password } = req.body;
     try {
       const normalizedUsername = username ? username.trim().replace(/\s+/g, ' ').toLowerCase() : '';
-      const hashedPassword = bcrypt.hashSync('taxpayer123', 10);
+      const normalizedFullName = full_name ? String(full_name).trim() : '';
+      const rawPassword = typeof password === 'string' ? password : '';
+
+      if (!normalizedUsername || !normalizedFullName || !rawPassword) {
+        return res.status(400).json({ error: 'Username, full name, and password are required' });
+      }
+
+      if (rawPassword.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters' });
+      }
+
+      const hashedPassword = bcrypt.hashSync(rawPassword, 10);
       const { rows } = await dbQuery(
         'INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4) RETURNING id',
-        [normalizedUsername, hashedPassword, 'taxpayer', full_name]
+        [normalizedUsername, hashedPassword, 'taxpayer', normalizedFullName]
       );
       
       const userId = rows[0].id;
-      const token = jwt.sign({ id: userId, role: 'taxpayer', name: full_name, username: normalizedUsername }, JWT_SECRET, { expiresIn: '24h' });
+      const token = jwt.sign({ id: userId, role: 'taxpayer', name: normalizedFullName, username: normalizedUsername }, JWT_SECRET, { expiresIn: '24h' });
       const isProd = process.env.NODE_ENV === 'production';
       res.cookie('token', token, { 
         httpOnly: true, 
         secure: isProd, 
         sameSite: isProd ? 'none' : 'lax' 
       });
-      res.json({ id: userId, username, role: 'taxpayer', full_name });
+      res.json({ id: userId, username: normalizedUsername, role: 'taxpayer', full_name: normalizedFullName });
     } catch (error: any) {
       if (error.code === '23505') res.status(400).json({ error: 'Username already exists' });
       else res.status(500).json({ error: 'Internal server error' });
@@ -989,7 +1118,8 @@ async function startServer() {
 
     try {
       const normalizedUsername = username.trim().replace(/\s+/g, ' ').toLowerCase();
-      const hashedPassword = bcrypt.hashSync('taxpayer123', 10);
+      const temporaryPassword = generateTemporaryPassword();
+      const hashedPassword = bcrypt.hashSync(temporaryPassword, 10);
       const { rows } = await dbQuery(
         'INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4) RETURNING id',
         [normalizedUsername, hashedPassword, 'taxpayer', full_name]
@@ -998,7 +1128,7 @@ async function startServer() {
       await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)',
         ['user_management', `Created taxpayer: ${full_name} (${normalizedUsername})`, req.user.id, new Date().toISOString()]);
 
-      res.json({ success: true, id: rows[0].id, username: normalizedUsername, full_name });
+      res.json({ success: true, id: rows[0].id, username: normalizedUsername, full_name, temporaryPassword });
     } catch (error: any) {
       if (error.code === '23505') res.status(400).json({ error: 'Username already exists' });
       else res.status(500).json({ error: 'Internal server error' });
@@ -1014,7 +1144,8 @@ async function startServer() {
 
     try {
       const normalizedUsername = username.trim().replace(/\s+/g, ' ');
-      const hashedPassword = bcrypt.hashSync('admin123', 10);
+      const temporaryPassword = generateTemporaryPassword();
+      const hashedPassword = bcrypt.hashSync(temporaryPassword, 10);
       const { rows } = await dbQuery(
         'INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4) RETURNING id',
         [normalizedUsername, hashedPassword, 'admin', full_name]
@@ -1023,7 +1154,7 @@ async function startServer() {
       await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)',
         ['user_management', `Created admin: ${full_name} (${normalizedUsername})`, req.user.id, new Date().toISOString()]);
 
-      res.json({ success: true, id: rows[0].id, username: normalizedUsername, full_name });
+      res.json({ success: true, id: rows[0].id, username: normalizedUsername, full_name, temporaryPassword });
     } catch (error: any) {
       if (error.code === '23505') res.status(400).json({ error: 'Username already exists' });
       else res.status(500).json({ error: 'Internal server error' });
@@ -1039,7 +1170,8 @@ async function startServer() {
 
     try {
       const normalizedUsername = username.trim().replace(/\s+/g, ' ').toLowerCase();
-      const hashedPassword = bcrypt.hashSync('collector123', 10);
+      const temporaryPassword = generateTemporaryPassword();
+      const hashedPassword = bcrypt.hashSync(temporaryPassword, 10);
       const { rows } = await dbQuery(
         'INSERT INTO users (username, password, role, full_name) VALUES ($1, $2, $3, $4) RETURNING id',
         [normalizedUsername, hashedPassword, 'collector', full_name]
@@ -1048,7 +1180,7 @@ async function startServer() {
       await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)',
         ['user_management', `Created collector: ${full_name} (${normalizedUsername})`, req.user.id, new Date().toISOString()]);
 
-      res.json({ success: true, id: rows[0].id, username: normalizedUsername, full_name });
+      res.json({ success: true, id: rows[0].id, username: normalizedUsername, full_name, temporaryPassword });
     } catch (error: any) {
       if (error.code === '23505') res.status(400).json({ error: 'Username already exists' });
       else res.status(500).json({ error: 'Internal server error' });
@@ -1176,7 +1308,12 @@ async function startServer() {
       if (!Array.isArray(pins) || pins.length === 0) {
         return res.json([]);
       }
-      const { rows } = await dbQuery(`SELECT * FROM properties WHERE pin = ANY($1)`, [pins]);
+
+      const sanitizedPins = pins
+        .map((pin: unknown) => typeof pin === 'string' ? pin.trim() : '')
+        .filter(Boolean);
+
+      const rows = await getAuthorizedPropertiesByPins(req.user, sanitizedPins);
       res.json(rows);
     } catch (err) {
       console.error('Fetch properties by pins error:', err);
@@ -1232,6 +1369,11 @@ async function startServer() {
     }
 
     try {
+      const hasAccess = await canAccessProperty(req.user, propertyIdNum);
+      if (!hasAccess) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
       // Fetch actual payments
       const { rows: payments } = await dbQuery(`
         SELECT 
@@ -1547,6 +1689,9 @@ async function startServer() {
   app.post('/api/admin/upload-roll', authenticateToken, upload.single('file'), async (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden: Admin access required' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (req.body?.confirmReplaceExistingData !== 'true') {
+      return res.status(400).json({ error: 'Upload confirmation is required before replacing existing data' });
+    }
 
     const results: any[] = [];
     // First, detect potential separator in first line
@@ -1567,138 +1712,196 @@ async function startServer() {
           console.log('[DEBUG] First Row Data Sample:', results[0]);
         }
 
-        try {
-          // NUCLEAR OPTION: Drop and Re-format the entire property database
-          await dbQuery(`
-            DROP TABLE IF EXISTS assessments CASCADE;
-            DROP TABLE IF EXISTS payments CASCADE;
-            DROP TABLE IF EXISTS property_owners CASCADE;
-            DROP TABLE IF EXISTS properties CASCADE;
-            CREATE TABLE properties (
-              id SERIAL PRIMARY KEY,
-              owner_id INTEGER REFERENCES users(id),
-              registered_owner_name TEXT,
-              pin TEXT,
-              td_no TEXT,
-              lot_no TEXT,
-              address TEXT,
-              kind TEXT,
-              assessed_value NUMERIC,
-              tax_due NUMERIC DEFAULT 0,
-              status TEXT,
-              last_payment_date TIMESTAMPTZ,
-              total_area TEXT,
-              ownership_type TEXT,
-              claimed_area TEXT,
-              taxability TEXT,
-              classification TEXT,
-              old_pin TEXT,
-              effectivity TEXT,
-              remarks TEXT
-            );
+        const stagedRows: Array<{
+          pin: string;
+          td_no: string | null;
+          registered_owner_name: string | null;
+          lot_no: string | null;
+          total_area: string | null;
+          assessed_value: number;
+          kind: string | null;
+          classification: string | null;
+          old_pin: string | null;
+          status: string;
+          taxability: string;
+          effectivity: string | null;
+          remarks: string | null;
+          row_number: number;
+        }> = [];
 
-            CREATE TABLE property_owners (
-              id SERIAL PRIMARY KEY,
-              property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
-              user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-              ownership_type TEXT,
-              claimed_area TEXT,
-              UNIQUE(property_id, user_id)
-            );
+        let errorCount = 0;
+        const errors: string[] = [];
 
-            CREATE TABLE payments (
-              id SERIAL PRIMARY KEY,
-              property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
-              taxpayer_id INTEGER REFERENCES users(id),
-              amount NUMERIC NOT NULL,
-              payment_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-              collector_id INTEGER REFERENCES users(id),
-              or_no TEXT,
-              year TEXT,
-              basic_tax NUMERIC,
-              sef_tax NUMERIC,
-              interest NUMERIC,
-              discount NUMERIC,
-              remarks TEXT
-            );
+        for (const [index, row] of results.entries()) {
+          const grab = (searchTerm: string) => {
+            const cleaned = searchTerm.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+            const key = Object.keys(row).find(k => k.toLowerCase().trim().replace(/[^a-z0-9]/g, '') === cleaned);
+            return key ? String(row[key] || '').trim() : null;
+          };
 
-            CREATE TABLE assessments (
-              id SERIAL PRIMARY KEY,
-              property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
-              taxpayer_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-              assigned_collector_id INTEGER REFERENCES users(id),
-              amount NUMERIC NOT NULL,
-              year TEXT,
-              basic_tax NUMERIC,
-              sef_tax NUMERIC,
-              interest NUMERIC,
-              discount NUMERIC,
-              status TEXT DEFAULT 'pending',
-              created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            );
-          `);
-          
-          await dbQuery('BEGIN');
-          
-          let successCount = 0;
-          let errorCount = 0;
-          const errors: string[] = [];
-          for (const [index, row] of results.entries()) {
-            const grab = (searchTerm: string) => {
-              const cleaned = searchTerm.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
-              const key = Object.keys(row).find(k => k.toLowerCase().trim().replace(/[^a-z0-9]/g, '') === cleaned);
-              return key ? String(row[key] || '').trim() : null;
-            };
+          const registeredOwner = grab('registeredowner') || grab('registered_owner') || grab('owner') || null;
+          const pin = grab('pin') || null;
+          const tdNo = grab('tdno') || grab('td_no') || null;
+          const lotNo = grab('lotblockno') || grab('lot_no') || grab('lot') || grab('block') || null;
+          const kind = grab('kind') || grab('description') || grab('propkind') || grab('propertykind') || grab('landkind') || null;
+          const classification = grab('classification') || grab('class') || grab('propclass') || null;
+          const assessedValueRaw = String(grab('assessedvalue') || grab('assessed_value') || grab('av') || '0').replace(/,/g, '');
+          const assessedVal = parseFloat(assessedValueRaw);
+          const oldPin = grab('oldpin') || grab('old_pin') || grab('old_pin_no') || null;
+          const area = grab('area') || grab('total_area') || grab('sqm') || null;
+          const status = grab('status') || grab('propstatus') || null;
+          const taxability = grab('taxability') || grab('taxable') || grab('tax_status') || null;
+          const effectivity = grab('effectivity') || grab('effective') || null;
+          const remarks = grab('remarks') || grab('comment') || null;
 
-            // STRIKE FORCE: ROBUST HEADER CAPTURE
-            const registeredOwner = grab('registeredowner') || grab('registered_owner') || grab('owner') || null;
-            const pin = grab('pin') || null;
-            const tdNo = grab('tdno') || grab('td_no') || null;
-            const lotNo = grab('lotblockno') || grab('lot_no') || grab('lot') || grab('block') || null;
-            const kind = grab('kind') || grab('description') || grab('propkind') || grab('propertykind') || grab('landkind') || null;
-            const classification = grab('classification') || grab('class') || grab('propclass') || null;
-            const assessedVal = parseFloat(String(grab('assessedvalue') || grab('assessed_value') || grab('av') || '0').replace(/,/g, ''));
-            const oldPin = grab('oldpin') || grab('old_pin') || grab('old_pin_no') || null;
-            const area = grab('area') || grab('total_area') || grab('sqm') || null;
-            const status = grab('status') || grab('propstatus') || null;
-            const taxability = grab('taxability') || grab('taxable') || grab('tax_status') || null;
-            const effectivity = grab('effectivity') || grab('effective') || null;
-            const remarks = grab('remarks') || grab('comment') || null;
-
-            if (index === 0) {
-              console.log('[DEBUG-ROLL] One Row Mapping:', { pin, status, taxability, classification });
-            }
-
-            if (!registeredOwner && !pin) continue;
-
-            try {
-              // Database insert - using UPSERT logic (replace if PIN exists)
-              await dbQuery(`
-                INSERT INTO properties (
-                  pin, td_no, registered_owner_name, lot_no, total_area, 
-                  assessed_value, kind, classification, old_pin, status, 
-                  taxability, effectivity, remarks
-                ) 
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-              `, [
-                pin, tdNo, registeredOwner, lotNo, area,
-                assessedVal, kind, classification, oldPin, status || '',
-                taxability || '', effectivity, remarks
-              ]);
-              successCount++;
-            } catch (e: any) {
-              errorCount++;
-              errors.push(`Failed to insert row. Owner: ${registeredOwner}, PIN: ${pin}. Error: ${e.message}`);
-            }
+          if (index === 0) {
+            console.log('[DEBUG-ROLL] One Row Mapping:', { pin, status, taxability, classification });
           }
 
-          await dbQuery('INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)',
-            ['system_data', `Uploaded new Tax Roll: ${successCount} properties imported`, req.user.id, new Date().toISOString()]);
+          if (!registeredOwner && !pin) continue;
 
-          await dbQuery('COMMIT');
-          res.json({ successCount, errorCount, errors });
+          if (!pin) {
+            errorCount++;
+            errors.push(`Row ${index + 1}: Missing PIN`);
+            continue;
+          }
+
+          if (Number.isNaN(assessedVal)) {
+            errorCount++;
+            errors.push(`Row ${index + 1}: Invalid assessed value for PIN ${pin}`);
+            continue;
+          }
+          stagedRows.push({
+            pin,
+            td_no: tdNo,
+            registered_owner_name: registeredOwner,
+            lot_no: lotNo,
+            total_area: area,
+            assessed_value: assessedVal,
+            kind,
+            classification,
+            old_pin: oldPin,
+            status: status || '',
+            taxability: taxability || '',
+            effectivity,
+            remarks,
+            row_number: stagedRows.length + 1
+          });
+        }
+
+        try {
+          if (results.length === 0) {
+            return res.status(400).json({ error: 'The uploaded roll file is empty' });
+          }
+
+          if (stagedRows.length === 0) {
+            return res.status(400).json({ error: 'No valid rows were found in the uploaded roll file', errorCount, errors });
+          }
+
+          if (dbInitStatus.mode === 'mock') {
+            mockStore.assessments = [];
+            mockStore.payments = [];
+            mockStore.property_owners = [];
+            mockStore.properties = stagedRows.map((row, idx) => ({
+              id: idx + 1,
+              owner_id: null,
+              address: null,
+              tax_due: 0,
+              last_payment_date: null,
+              ownership_type: null,
+              claimed_area: null,
+              ...row
+            }));
+            mockStore.admin_logs.push({
+              id: mockStore.admin_logs.length + 1,
+              action_type: 'system_data',
+              details: `Uploaded new Tax Roll: ${stagedRows.length} properties imported`,
+              admin_id: req.user.id,
+              created_at: new Date().toISOString()
+            });
+            return res.json({ successCount: stagedRows.length, errorCount, errors });
+          }
+
+          const client = await pool.connect();
+          try {
+            await client.query('BEGIN');
+            await client.query(`
+              CREATE TEMP TABLE roll_import_stage (
+                row_number INTEGER NOT NULL,
+                pin TEXT NOT NULL,
+                td_no TEXT,
+                registered_owner_name TEXT,
+                lot_no TEXT,
+                total_area TEXT,
+                assessed_value NUMERIC,
+                kind TEXT,
+                classification TEXT,
+                old_pin TEXT,
+                status TEXT,
+                taxability TEXT,
+                effectivity TEXT,
+                remarks TEXT
+              ) ON COMMIT DROP
+            `);
+
+            for (const row of stagedRows) {
+              await client.query(
+                `INSERT INTO roll_import_stage (
+                  row_number, pin, td_no, registered_owner_name, lot_no, total_area,
+                  assessed_value, kind, classification, old_pin, status, taxability, effectivity, remarks
+                ) VALUES (
+                  $1, $2, $3, $4, $5, $6,
+                  $7, $8, $9, $10, $11, $12, $13, $14
+                )`,
+                [
+                  row.row_number,
+                  row.pin,
+                  row.td_no,
+                  row.registered_owner_name,
+                  row.lot_no,
+                  row.total_area,
+                  row.assessed_value,
+                  row.kind,
+                  row.classification,
+                  row.old_pin,
+                  row.status,
+                  row.taxability,
+                  row.effectivity,
+                  row.remarks
+                ]
+              );
+            }
+
+            await client.query('TRUNCATE TABLE assessments, payments, property_owners, properties RESTART IDENTITY CASCADE');
+
+            await client.query(`
+              INSERT INTO properties (
+                pin, td_no, registered_owner_name, lot_no, total_area,
+                assessed_value, kind, classification, old_pin, status,
+                taxability, effectivity, remarks
+              )
+              SELECT
+                pin, td_no, registered_owner_name, lot_no, total_area,
+                assessed_value, kind, classification, old_pin, status,
+                taxability, effectivity, remarks
+              FROM roll_import_stage
+              ORDER BY row_number
+            `);
+
+            await client.query(
+              'INSERT INTO admin_logs (action_type, details, admin_id, created_at) VALUES ($1, $2, $3, $4)',
+              ['system_data', `Uploaded new Tax Roll via staged import: ${stagedRows.length} properties imported`, req.user.id, new Date().toISOString()]
+            );
+
+            await client.query('COMMIT');
+            res.json({ successCount: stagedRows.length, errorCount, errors });
+          } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+          } finally {
+            client.release();
+          }
         } catch (err: any) {
-          await dbQuery('ROLLBACK');
           console.error('Roll upload transaction error:', err);
           res.status(500).json({ error: err.message });
         }
@@ -1803,7 +2006,7 @@ async function startServer() {
         if (collisionRows.length > 0) {
           username = `${username}${Math.floor(Math.random() * 9999)}`;
         }
-        const hashedPassword = bcrypt.hashSync('taxpayer123', 10);
+        const hashedPassword = bcrypt.hashSync(generateTemporaryPassword(), 10);
         
         const { rows: insertRows } = await dbQuery(
           'INSERT INTO users (username, password, role, full_name, age, gender, phone_number, queue_number, queue_date) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, username, full_name, queue_number, phone_number',
@@ -2450,6 +2653,136 @@ async function startServer() {
     } catch (err) {
       console.error('Delete barangay error:', err);
       res.status(500).json({ error: 'Failed to delete barangay' });
+    }
+  });
+
+  app.get('/api/admin/computation-types', authenticateToken, async (req: any, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const { rows } = await dbQuery(
+        `SELECT id, label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin, created_at
+         FROM custom_computation_types
+         ORDER BY is_builtin DESC, created_at ASC, id ASC`
+      );
+      res.json(rows);
+    } catch (err) {
+      console.error('Fetch custom computation types error:', err);
+      res.status(500).json({ error: 'Failed to fetch custom computation types' });
+    }
+  });
+
+  app.post('/api/admin/computation-types', authenticateToken, async (req: any, res) => {
+    if (req.user.username.toLowerCase() !== 'manlie') return res.status(403).json({ error: 'Forbidden' });
+
+    const { label, base_type, description, special_case_hook, effective_from, effective_to, config, is_active } = req.body || {};
+    if (!label || !base_type) return res.status(400).json({ error: 'Missing label or base type' });
+    if (!['standard', 'rpvara', 'denr', 'share'].includes(base_type)) {
+      return res.status(400).json({ error: 'Invalid base type' });
+    }
+    if (!['none', 'rpvara_2024_half', 'denr_10_year_window'].includes(special_case_hook || 'none')) {
+      return res.status(400).json({ error: 'Invalid special case hook' });
+    }
+
+    try {
+      const baseValue = String(label)
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40) || `custom-${Date.now()}`;
+
+      let candidateValue = `custom-${baseValue}`;
+      let counter = 1;
+      while (true) {
+        const existing = await dbQuery('SELECT id FROM custom_computation_types WHERE value = $1', [candidateValue]);
+        if (existing.rows.length === 0) break;
+        counter += 1;
+        candidateValue = `custom-${baseValue}-${counter}`;
+      }
+
+      const { rows } = await dbQuery(
+        `INSERT INTO custom_computation_types
+          (label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, FALSE)
+         RETURNING id, label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin, created_at`,
+        [
+          String(label).trim(),
+          candidateValue,
+          base_type,
+          description ? String(description).trim() : null,
+          special_case_hook || 'none',
+          effective_from || null,
+          effective_to || null,
+          JSON.stringify(config || {}),
+          is_active !== false
+        ]
+      );
+
+      res.status(201).json(rows[0]);
+    } catch (err) {
+      console.error('Create custom computation type error:', err);
+      res.status(500).json({ error: 'Failed to create custom computation type' });
+    }
+  });
+
+  app.delete('/api/admin/computation-types/:id', authenticateToken, async (req: any, res) => {
+    if (req.user.username.toLowerCase() !== 'manlie') return res.status(403).json({ error: 'Forbidden' });
+    try {
+      const existing = await dbQuery('SELECT is_builtin FROM custom_computation_types WHERE id = $1', [req.params.id]);
+      if (existing.rows[0]?.is_builtin) {
+        return res.status(400).json({ error: 'Built-in computation rules cannot be deleted. Edit or deactivate them instead.' });
+      }
+      await dbQuery('DELETE FROM custom_computation_types WHERE id = $1', [req.params.id]);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Delete custom computation type error:', err);
+      res.status(500).json({ error: 'Failed to delete custom computation type' });
+    }
+  });
+
+  app.put('/api/admin/computation-types/:id', authenticateToken, async (req: any, res) => {
+    if (req.user.username.toLowerCase() !== 'manlie') return res.status(403).json({ error: 'Forbidden' });
+
+    const { label, base_type, description, special_case_hook, effective_from, effective_to, config, is_active } = req.body || {};
+    if (!label || !base_type) return res.status(400).json({ error: 'Missing label or base type' });
+    if (!['standard', 'rpvara', 'denr', 'share'].includes(base_type)) {
+      return res.status(400).json({ error: 'Invalid base type' });
+    }
+    if (!['none', 'rpvara_2024_half', 'denr_10_year_window'].includes(special_case_hook || 'none')) {
+      return res.status(400).json({ error: 'Invalid special case hook' });
+    }
+
+    try {
+      const { rows } = await dbQuery(
+        `UPDATE custom_computation_types
+         SET label = $1,
+             base_type = $2,
+             description = $3,
+             special_case_hook = $4,
+             effective_from = $5,
+             effective_to = $6,
+             config = $7::jsonb,
+             is_active = $8
+         WHERE id = $9
+         RETURNING id, label, value, base_type, description, special_case_hook, effective_from, effective_to, config, is_active, is_builtin, created_at`,
+        [
+          String(label).trim(),
+          base_type,
+          description ? String(description).trim() : null,
+          special_case_hook || 'none',
+          effective_from || null,
+          effective_to || null,
+          JSON.stringify(config || {}),
+          is_active !== false,
+          req.params.id
+        ]
+      );
+
+      if (!rows[0]) return res.status(404).json({ error: 'Computation type not found' });
+      res.json(rows[0]);
+    } catch (err) {
+      console.error('Update custom computation type error:', err);
+      res.status(500).json({ error: 'Failed to update custom computation type' });
     }
   });
 

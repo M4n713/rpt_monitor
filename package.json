@@ -10,7 +10,8 @@
     "build:server": "tsc -p tsconfig.server.json",
     "start": "cross-env NODE_ENV=production node dist-server/server.js",
     "clean": "rm -rf dist dist-server",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:soa": "node --experimental-strip-types tests/soaPdf.regression.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

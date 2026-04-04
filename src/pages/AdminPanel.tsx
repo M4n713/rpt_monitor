@@ -3,6 +3,16 @@ import * as pdfjsLib from 'pdfjs-dist';
 import { useAuth } from '../components/ui/context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { formatPinSearch, autoFormatPinInput } from '@/src/lib/utils';
+import { extractSoaData, normalizeArea, normalizeLotNo, normalizeOwnerName, normalizePin, type SoaExtractionResult } from '@/src/lib/soaPdf';
+import {
+  DEFAULT_COMPUTATION_RULES,
+  getAvailableRules,
+  isRuleEffective,
+  calculateTaxForYear as computeTaxForYear,
+  calculateTaxForRange as computeTaxForRange,
+  type ComputationRule,
+  type ComputationRuleConfig,
+} from '@/src/lib/rptComputation';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/src/components/ui/card';
 import { Button } from '@/src/components/ui/button';
 import { Input } from '@/src/components/ui/input';
@@ -119,6 +129,30 @@ interface Payment {
   remarks?: string;
 }
 
+interface RptarUploadedSoaBatch {
+  fileName: string;
+  summary: SoaExtractionResult;
+  rows: any[];
+}
+
+const buildPinMetaMap = (items: Property[]) => {
+  const counts = new Map<string, number>();
+  const seen = new Map<string, number>();
+  const meta = new Map<number, { count: number; index: number }>();
+
+  items.forEach(item => {
+    counts.set(item.pin, (counts.get(item.pin) || 0) + 1);
+  });
+
+  items.forEach(item => {
+    const index = (seen.get(item.pin) || 0) + 1;
+    seen.set(item.pin, index);
+    meta.set(item.id, { count: counts.get(item.pin) || 1, index });
+  });
+
+  return meta;
+};
+
 const getLocationFromPin = (pin: string) => {
   if (!pin) return 'Unknown Location';
   const parts = pin.split('-');
@@ -208,212 +242,32 @@ const STANDARD_RANGES = [
   [2007, 2015], [2016, 2026]
 ];
 
-const calculateTaxForYear = (year: number, prop: any, computationType: string, manualAssessedValue?: number | string) => {
-  const now = getPHTimeNow();
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth(); // 0-11
+const calculateTaxForYear = (
+  year: number,
+  prop: any,
+  computationType: string,
+  manualAssessedValue?: number | string,
+  options = {},
+  rules?: ComputationRule[]
+) => computeTaxForYear(year, prop, computationType, manualAssessedValue, options, rules);
+ 
+ 
 
-  // Robustly parse assessed value so it never accidentally becomes 0 or NaN
-  let rawAssessed = (manualAssessedValue !== undefined && manualAssessedValue !== null && manualAssessedValue !== '')
-    ? manualAssessedValue
-    : prop?.assessed_value;
+const calculateTaxForRange = (
+  startYearInput: number | string,
+  endYearInput: number | string,
+  prop: any,
+  computationType: string,
+  manualAssessedValue?: number | string,
+  options = {},
+  rules?: ComputationRule[]
+) => computeTaxForRange(startYearInput, endYearInput, prop, computationType, manualAssessedValue, options, rules);
 
-  let assessedVal = 0;
-  if (typeof rawAssessed === 'string') {
-    assessedVal = parseFloat(rawAssessed.replace(/[^0-9.-]/g, ''));
-  } else if (typeof rawAssessed === 'number') {
-    assessedVal = rawAssessed;
-  }
-  if (isNaN(assessedVal)) assessedVal = 0;
+const getCalculationOptions = (applyInterest: boolean, applyDiscount: boolean) => ({
+  includeInterest: applyInterest,
+  includeDiscount: applyDiscount
+});
 
-  // Adjust for Share Area if applicable
-  if (computationType === 'share' && prop?.total_area && prop?.claimed_area) {
-    const totalArea = parseFloat(prop.total_area.toString().replace(/[^0-9.]/g, '')) || 1;
-    const claimedArea = parseFloat(prop.claimed_area.toString().replace(/[^0-9.]/g, '')) || totalArea;
-    assessedVal = assessedVal * (claimedArea / totalArea);
-  }
-
-  const basic = assessedVal * 0.01;
-  const sef = assessedVal * 0.01;
-  const taxDue = basic + sef;
-
-  let basicInterest = 0;
-  let sefInterest = 0;
-  let basicDiscount = 0;
-  let sefDiscount = 0;
-
-  if (year > currentYear) {
-    // Advance Payment
-    if (computationType === 'share') {
-      basicDiscount = Math.round((basic * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sef * 0.10) * 100) / 100;
-    } else {
-      basicDiscount = Math.round((basic * 0.20) * 100) / 100;
-      sefDiscount = Math.round((sef * 0.20) * 100) / 100;
-    }
-  } else if (year === currentYear) {
-    // Current Year Payment
-    const basicQuarter = basic / 4;
-    const sefQuarter = sef / 4;
-    const monthsElapsed = currentMonth + 1;
-
-    if (currentMonth < 3) {
-      basicDiscount = Math.round((basic * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sef * 0.10) * 100) / 100;
-    } else if (currentMonth < 6) {
-      basicInterest = Math.round((basicQuarter * 0.02 * monthsElapsed) * 100) / 100;
-      sefInterest = Math.round((sefQuarter * 0.02 * monthsElapsed) * 100) / 100;
-      basicDiscount = Math.round((basicQuarter * 3 * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sefQuarter * 3 * 0.10) * 100) / 100;
-    } else if (currentMonth < 9) {
-      basicInterest = Math.round((basicQuarter * 2 * 0.02 * monthsElapsed) * 100) / 100;
-      sefInterest = Math.round((sefQuarter * 2 * 0.02 * monthsElapsed) * 100) / 100;
-      basicDiscount = Math.round((basicQuarter * 2 * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sefQuarter * 2 * 0.10) * 100) / 100;
-    } else {
-      basicInterest = Math.round((basicQuarter * 3 * 0.02 * monthsElapsed) * 100) / 100;
-      sefInterest = Math.round((sefQuarter * 3 * 0.02 * monthsElapsed) * 100) / 100;
-      basicDiscount = Math.round((basicQuarter * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sefQuarter * 0.10) * 100) / 100;
-    }
-  } else {
-    // Delinquent Payment
-    const rpvaraDeadline = new Date('2026-07-05');
-    const isRpvaraActive = now <= rpvaraDeadline;
-
-    if (computationType === 'rpvara' && isRpvaraActive) {
-      if (year < 2024) {
-        // Penalty fully waived for all delinquencies on or before June 30, 2024 — no interest
-      } else if (year === 2024) {
-        // Interest runs from July 1, 2024 up to the current month (accumulating).
-        // Since RPVARA waived Jan-June, only the second half (50%) is subject to interest.
-        const monthsDiff = (currentYear - 2024) * 12 + currentMonth - 5;
-        if (monthsDiff > 0) {
-          let interestRate = monthsDiff * 0.02;
-          interestRate = Math.min(interestRate, 0.72); // 72% cap
-          basicInterest = Math.round(((basic * 0.5) * interestRate) * 100) / 100;
-          sefInterest = Math.round(((sef * 0.5) * interestRate) * 100) / 100;
-        }
-      } else {
-        // 2025 onwards: standard 2% per month with the applicable cap
-        const monthsDiff = (currentYear - year) * 12 + currentMonth + 1;
-        let interestRate = monthsDiff * 0.02;
-        interestRate = year >= 1992 ? Math.min(interestRate, 0.72) : Math.min(interestRate, 0.24);
-        basicInterest = Math.round((basic * interestRate) * 100) / 100;
-        sefInterest = Math.round((sef * interestRate) * 100) / 100;
-      }
-    } else if (computationType === 'amnesty') {
-      // Amnesty waives all penalties/interest for delinquent taxes
-      basicInterest = 0;
-      sefInterest = 0;
-      basicDiscount = 0;
-      sefDiscount = 0;
-    } else if (computationType === 'denr') {
-      // DENR: skip years older than 10 years ago
-      if (year < currentYear - 10) {
-        return {
-          basic_tax: 0,
-          sef_tax: 0,
-          interest: 0,
-          discount: 0,
-          amount: 0
-        };
-      } else {
-        // Delinquent years within the 10-year window: no interest, no discount
-        basicInterest = 0;
-        sefInterest = 0;
-        basicDiscount = 0;
-        sefDiscount = 0;
-      }
-    } else {
-      // Standard Delinquent
-      const monthsDiff = (currentYear - year) * 12 + currentMonth + 1;
-      let interestRate = monthsDiff * 0.02;
-      interestRate = year >= 1992 ? Math.min(interestRate, 0.72) : Math.min(interestRate, 0.24);
-      basicInterest = Math.round((basic * interestRate) * 100) / 100;
-      sefInterest = Math.round((sef * interestRate) * 100) / 100;
-    }
-  }
-
-  const finalInterest = basicInterest + sefInterest;
-  const finalDiscount = basicDiscount + sefDiscount;
-
-  return {
-    basic_tax: basic,
-    sef_tax: sef,
-    interest: finalInterest,
-    discount: finalDiscount,
-    amount: taxDue + finalInterest - finalDiscount
-  };
-};
-
-const calculateTaxForRange = (startYearInput: number | string, endYearInput: number | string, prop: any, computationType: string, manualAssessedValue?: number | string) => {
-  const currentYear = getPHTimeNow().getFullYear();
-
-  let startYear = parseInt(startYearInput as string, 10);
-  let endYear = parseInt(endYearInput as string, 10);
-
-  // 1. Handle case where startYearInput is a string like "2025 - 2026"
-  if (typeof startYearInput === 'string' && startYearInput.includes('-')) {
-    const parts = startYearInput.split('-');
-    startYear = parseInt(parts[0].trim(), 10);
-    endYear = parseInt(parts[1].trim(), 10);
-  }
-
-  // Fallback if parsing fails
-  if (isNaN(startYear)) startYear = currentYear;
-  if (isNaN(endYear)) endYear = startYear;
-
-  // 2. DENR Override: Force the range to be exactly 10 years ago to the current year
-  if (computationType === 'denr') {
-    const tenYearsAgo = currentYear - 10;
-    startYear = tenYearsAgo;
-    endYear = currentYear;
-  }
-
-  let totalBasic = 0;
-  let totalSef = 0;
-  let totalInterest = 0;
-  let totalDiscount = 0;
-  let totalAmount = 0;
-
-  // 3. Create an array to hold the breakdown for each individual year
-  const breakdown = [];
-
-  for (let y = startYear; y <= endYear; y++) {
-    const result = calculateTaxForYear(y, prop, computationType, manualAssessedValue);
-
-    // Push the individual year's result into the breakdown array
-    breakdown.push({
-      year: y,
-      basic_tax: result.basic_tax,
-      sef_tax: result.sef_tax,
-      interest: result.interest,
-      discount: result.discount,
-      amount: result.amount
-    });
-
-    totalBasic += result.basic_tax;
-    totalSef += result.sef_tax;
-    totalInterest += result.interest;
-    totalDiscount += result.discount;
-    totalAmount += result.amount;
-  }
-
-  const computedRangeLabel = startYear === endYear ? `${startYear}` : `${startYear} - ${endYear}`;
-
-  return {
-    basic_tax: totalBasic.toFixed(2),
-    sef_tax: totalSef.toFixed(2),
-    interest: totalInterest.toFixed(2),
-    discount: totalDiscount.toFixed(2),
-    amount: totalAmount.toFixed(2),
-    computedStartYear: startYear,
-    computedEndYear: endYear,
-    computedRangeLabel: computedRangeLabel, // e.g., "2016 - 2026"
-    breakdown: breakdown // The array containing data for your breakdown table
-  };
-};
 import { ActiveUsersList } from '@/src/components/ActiveUsersList';
 import { MessagingPanel } from '@/src/components/MessagingPanel';
 import { MessagePopup } from '@/src/components/MessagePopup';
@@ -461,7 +315,9 @@ export default function AdminPanel() {
     interest: '',
     discount: '',
     amount: '',
-    computationType: 'standard'
+    computationType: 'standard',
+    applyInterest: false,
+    applyDiscount: false
   });
 
   const [messageForm, setMessageForm] = useState<{title: string, body: string, target_role: string, audioFile: File | null}>({
@@ -494,10 +350,15 @@ export default function AdminPanel() {
   const [rptarPayments, setRptarPayments] = useState<Payment[]>([]);
   const [allPayments, setAllPayments] = useState<Payment[]>([]);
   const [isRptarSearching, setIsRptarSearching] = useState(false);
+  const [isRptarPdfProcessing, setIsRptarPdfProcessing] = useState(false);
+  const rptarPdfInputRef = useRef<HTMLInputElement>(null);
+  const [rptarUploadedSoasByProperty, setRptarUploadedSoasByProperty] = useState<Record<number, RptarUploadedSoaBatch[]>>({});
+  const [rptarUploadStatus, setRptarUploadStatus] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isPdfProcessing, setIsPdfProcessing] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const [isAbstractUploading, setIsAbstractUploading] = useState(false);
   const [extractedPdfData, setExtractedPdfData] = useState<Array<{ startYear: number; endYear: number; assessed_value: number }> | null>(null);
+  const [uploadedSoaSummary, setUploadedSoaSummary] = useState<SoaExtractionResult | null>(null);
   const [abstractSearchQuery, setAbstractSearchQuery] = useState('');
   const [activeAbstractSearchQuery, setActiveAbstractSearchQuery] = useState('');
   const [abstractCollectorFilter, setAbstractCollectorFilter] = useState('all');
@@ -543,6 +404,19 @@ export default function AdminPanel() {
   const [taxpayerTimeIn, setTaxpayerTimeIn] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState('tagging');
   const [activeSettingsTab, setActiveSettingsTab] = useState('create-taxpayer');
+  const [customComputationTypes, setCustomComputationTypes] = useState<ComputationRule[]>([]);
+  const [editingComputationTypeId, setEditingComputationTypeId] = useState<number | null>(null);
+  const [customComputationForm, setCustomComputationForm] = useState({
+    label: '',
+    base_type: 'standard' as 'standard' | 'rpvara' | 'denr' | 'share',
+    description: '',
+    special_case_hook: 'none' as 'none' | 'rpvara_2024_half' | 'denr_10_year_window',
+    effective_from: '',
+    effective_to: '',
+    is_active: true,
+    config_json: JSON.stringify(DEFAULT_COMPUTATION_RULES[0].config, null, 2)
+  });
+  const [customComputationStatus, setCustomComputationStatus] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeUsersCount, setActiveUsersCount] = useState(0);
   const [accountToDelete, setAccountToDelete] = useState<string>('');
@@ -554,6 +428,22 @@ export default function AdminPanel() {
   const [changePasswordMessage, setChangePasswordMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [erptaasPin, setErptaasPin] = useState('');
   const [erptaasUrl, setErptaasUrl] = useState('');
+
+  const availableComputationRules = useMemo(
+    () => getAvailableRules(customComputationTypes),
+    [customComputationTypes]
+  );
+
+  const resolvedComputationType = useMemo(
+    () => availableComputationRules.find(rule => rule.value === paymentForm.computationType)?.value || 'standard',
+    [availableComputationRules, paymentForm.computationType]
+  );
+
+  useEffect(() => {
+    if (!availableComputationRules.some(rule => rule.value === paymentForm.computationType)) {
+      setPaymentForm(prev => ({ ...prev, computationType: 'standard' }));
+    }
+  }, [availableComputationRules, paymentForm.computationType]);
 
   // Barangay State
   const [barangays, setBarangays] = useState<any[]>([]);
@@ -569,6 +459,15 @@ export default function AdminPanel() {
     }
   };
 
+  const fetchCustomComputationTypes = async () => {
+    try {
+      const res = await fetch('/api/admin/computation-types');
+      if (res.ok) setCustomComputationTypes(await res.json());
+    } catch (err) {
+      console.error('Failed to fetch custom computation types:', err);
+    }
+  };
+
   // Delinquency Report State
   const [delinquencyData, setDelinquencyData] = useState<any[]>([]);
   const [delinquencyReportType, setDelinquencyReportType] = useState<'5year' | 'actual'>('5year');
@@ -576,6 +475,13 @@ export default function AdminPanel() {
   const [delinquencyInterestMode, setDelinquencyInterestMode] = useState<'with' | 'without'>('with');
   const [isDelinquencyLoading, setIsDelinquencyLoading] = useState(false);
   const [delinquencyReportGenerated, setDelinquencyReportGenerated] = useState(false);
+
+  const taggingPinMeta = useMemo(() => buildPinMetaMap(searchResults), [searchResults]);
+  const rptarPinMeta = useMemo(() => buildPinMetaMap(rptarSearchResults), [rptarSearchResults]);
+  const selectedRptarUploadedSoas = useMemo(
+    () => (rptarSelectedPropertyId ? (rptarUploadedSoasByProperty[rptarSelectedPropertyId] || []) : []),
+    [rptarSelectedPropertyId, rptarUploadedSoasByProperty]
+  );
 
   const fetchDelinquencyReport = async () => {
     setIsDelinquencyLoading(true);
@@ -744,6 +650,7 @@ export default function AdminPanel() {
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'reset-password', label: 'Reset Password', icon: Lock }] : []),
     { id: 'change-password', label: 'Change Password', icon: Lock },
     { id: 'direct-messages', label: 'Direct Messages', icon: MessageSquare },
+    ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'manage-computation-types', label: 'RPT Computation Types', icon: Calculator }] : []),
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'manage-barangays', label: 'Manage Barangays', icon: MapPin }] : []),
     ...(user?.username.toLowerCase() === 'manlie' ? [{ id: 'manage-data', label: 'Manage Data', icon: Database }] : []),
   ];
@@ -763,6 +670,10 @@ export default function AdminPanel() {
     } else {
       setRptarPayments([]);
     }
+  }, [rptarSelectedPropertyId]);
+
+  useEffect(() => {
+    setRptarUploadStatus(null);
   }, [rptarSelectedPropertyId]);
 
   const fetchAllPayments = async () => {
@@ -801,6 +712,8 @@ export default function AdminPanel() {
     if (!queryToUse.trim()) return;
     setIsRptarSearching(true);
     setRptarSelectedPropertyId(null);
+    setRptarUploadedSoasByProperty({});
+    setRptarUploadStatus(null);
     try {
       const formattedQuery = formatPinSearch(queryToUse);
       const res = await fetch(`/api/properties?search=${encodeURIComponent(formattedQuery)}&includeTaxpayer=true`);
@@ -829,6 +742,28 @@ export default function AdminPanel() {
     } finally {
       setIsRptarSearching(false);
     }
+  };
+
+  const getSoaMatchIssues = (soa: SoaExtractionResult, prop: Property) => {
+    const issues: string[] = [];
+
+    if (!soa.ownerName || normalizeOwnerName(soa.ownerName) !== normalizeOwnerName(prop.registered_owner_name)) {
+      issues.push(`Registered Owner mismatch (SOA: ${soa.ownerName || 'Not found'} | App: ${prop.registered_owner_name || 'Not found'})`);
+    }
+
+    if (!soa.pin || normalizePin(soa.pin) !== normalizePin(prop.pin)) {
+      issues.push(`PIN mismatch (SOA: ${soa.pin || 'Not found'} | App: ${prop.pin || 'Not found'})`);
+    }
+
+    if (!soa.lotNo || normalizeLotNo(soa.lotNo) !== normalizeLotNo(prop.lot_no)) {
+      issues.push(`Lot# mismatch (SOA: ${soa.lotNo || 'Not found'} | App: ${prop.lot_no || 'Not found'})`);
+    }
+
+    if (!soa.area || normalizeArea(soa.area) !== normalizeArea(prop.total_area)) {
+      issues.push(`Area mismatch (SOA: ${soa.area || 'Not found'} | App: ${prop.total_area || 'Not found'})`);
+    }
+
+    return issues;
   };
 
   const fetchTaxpayerLogs = async () => {
@@ -871,9 +806,10 @@ export default function AdminPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(collectorForm),
       });
+      const data = await res.json();
 
       if (res.ok) {
-        alert('Collector account created successfully');
+        alert(`Collector account created.\nTemporary password: ${data.temporaryPassword}`);
         setCollectorForm({ username: '', full_name: '' });
         // Refresh users list
         fetch('/api/users')
@@ -887,13 +823,7 @@ export default function AdminPanel() {
           .then(setUsers)
           .catch(console.error);
       } else {
-        const contentType = res.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const data = await res.json();
-          alert(data.error || 'Failed to create collector');
-        } else {
-          alert('Server error occurred');
-        }
+        alert(data.error || 'Failed to create collector');
       }
     } catch (err) {
       console.error('Create collector error', err);
@@ -942,6 +872,95 @@ export default function AdminPanel() {
     }
   };
 
+  const handleCreateCustomComputationType = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCustomComputationStatus(null);
+
+    try {
+      const parsedConfig = JSON.parse(customComputationForm.config_json) as Partial<ComputationRuleConfig>;
+      const payload = {
+        label: customComputationForm.label,
+        base_type: customComputationForm.base_type,
+        description: customComputationForm.description,
+        special_case_hook: customComputationForm.special_case_hook,
+        effective_from: customComputationForm.effective_from || null,
+        effective_to: customComputationForm.effective_to || null,
+        is_active: customComputationForm.is_active,
+        config: parsedConfig,
+      };
+
+      const res = await fetch(
+        editingComputationTypeId ? `/api/admin/computation-types/${editingComputationTypeId}` : '/api/admin/computation-types',
+        {
+          method: editingComputationTypeId ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      );
+
+      const data = await res.json();
+      if (res.ok) {
+        setCustomComputationStatus({ type: 'success', text: editingComputationTypeId ? 'Computation rule updated.' : 'Computation rule added.' });
+        setEditingComputationTypeId(null);
+        setCustomComputationForm({
+          label: '',
+          base_type: 'standard',
+          description: '',
+          special_case_hook: 'none',
+          effective_from: '',
+          effective_to: '',
+          is_active: true,
+          config_json: JSON.stringify(DEFAULT_COMPUTATION_RULES[0].config, null, 2)
+        });
+        fetchCustomComputationTypes();
+      } else {
+        setCustomComputationStatus({ type: 'error', text: data.error || 'Failed to save computation rule.' });
+      }
+    } catch (err) {
+      console.error('Create custom computation type error', err);
+      setCustomComputationStatus({ type: 'error', text: 'Invalid rule configuration JSON or failed to save rule.' });
+    }
+  };
+
+  const handleDeleteCustomComputationType = async (id: number) => {
+    if (!confirm('Are you sure you want to delete this custom computation type?')) return;
+
+    try {
+      const res = await fetch(`/api/admin/computation-types/${id}`, {
+        method: 'DELETE',
+      });
+
+      if (res.ok) {
+        const deletedType = customComputationTypes.find(type => type.id === id);
+        if (deletedType && paymentForm.computationType === deletedType.value) {
+          setPaymentForm(prev => ({ ...prev, computationType: 'standard' }));
+        }
+        fetchCustomComputationTypes();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Failed to delete computation type');
+      }
+    } catch (err) {
+      console.error('Delete custom computation type error', err);
+      alert('Failed to delete computation type');
+    }
+  };
+
+  const loadComputationRuleIntoForm = (rule: ComputationRule) => {
+    setEditingComputationTypeId(rule.id || null);
+    setCustomComputationForm({
+      label: rule.label,
+      base_type: rule.base_type,
+      description: rule.description || '',
+      special_case_hook: rule.special_case_hook,
+      effective_from: rule.effective_from || '',
+      effective_to: rule.effective_to || '',
+      is_active: rule.is_active !== false,
+      config_json: JSON.stringify(rule.config || DEFAULT_COMPUTATION_RULES[0].config, null, 2)
+    });
+    setCustomComputationStatus(null);
+  };
+
   const handleCreateAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!adminForm.username || !adminForm.full_name) return;
@@ -952,9 +971,10 @@ export default function AdminPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(adminForm),
       });
+      const data = await res.json();
 
       if (res.ok) {
-        alert('Admin account created successfully');
+        alert(`Admin account created.\nTemporary password: ${data.temporaryPassword}`);
         setAdminForm({ username: '', full_name: '' });
         fetch('/api/users')
           .then(res => {
@@ -967,13 +987,7 @@ export default function AdminPanel() {
           .then(setUsers)
           .catch(console.error);
       } else {
-        const contentType = res.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const data = await res.json();
-          alert(data.error || 'Failed to create admin');
-        } else {
-          alert('Server error occurred');
-        }
+        alert(data.error || 'Failed to create admin');
       }
     } catch (err) {
       console.error('Create admin error', err);
@@ -990,9 +1004,10 @@ export default function AdminPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(taxpayerForm),
       });
+      const data = await res.json();
 
       if (res.ok) {
-        alert('Taxpayer account created successfully');
+        alert(`Taxpayer account created.\nTemporary password: ${data.temporaryPassword}`);
         setTaxpayerForm({ username: '', full_name: '' });
         // Refresh users list
         fetch('/api/users')
@@ -1006,13 +1021,7 @@ export default function AdminPanel() {
           .then(setUsers)
           .catch(console.error);
       } else {
-        const contentType = res.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const data = await res.json();
-          alert(data.error || 'Failed to create taxpayer');
-        } else {
-          alert('Server error occurred');
-        }
+        alert(data.error || 'Failed to create taxpayer');
       }
     } catch (err) {
       console.error('Create taxpayer error', err);
@@ -1051,7 +1060,12 @@ export default function AdminPanel() {
 
       if (res.ok) {
         const data = await res.json();
-        setResetPasswordMessage({ type: 'success', text: data.message || 'Password reset successfully' });
+        setResetPasswordMessage({
+          type: 'success',
+          text: data.temporaryPassword
+            ? `${data.message || 'Password reset successfully'}. Temporary password: ${data.temporaryPassword}`
+            : (data.message || 'Password reset successfully')
+        });
         setSelectedUserForReset(null);
         setTimeout(() => setResetPasswordMessage(null), 3000);
       } else {
@@ -1213,6 +1227,7 @@ export default function AdminPanel() {
 
   useEffect(() => {
     fetchUsers();
+    fetchCustomComputationTypes();
     fetch('/api/admin/collectors')
       .then(res => {
         const contentType = res.headers.get('content-type');
@@ -1243,6 +1258,7 @@ export default function AdminPanel() {
   useEffect(() => {
     setSelectedComputationPropertyId('');
     setPaymentQueue([]);
+    setUploadedSoaSummary(null);
     resetForm();
   }, [selectedTaxpayerId]);
 
@@ -1251,6 +1267,7 @@ export default function AdminPanel() {
     if (!showComputation) {
       setSelectedComputationPropertyId('');
       setPaymentQueue([]);
+      setUploadedSoaSummary(null);
       resetForm();
     }
   }, [showComputation]);
@@ -1279,6 +1296,7 @@ export default function AdminPanel() {
           discount: '0.00',
           amount: (basic + sef).toFixed(2)
         }));
+        setUploadedSoaSummary(null);
       }
     }
   }, [selectedComputationPropertyId]);
@@ -1294,14 +1312,22 @@ export default function AdminPanel() {
 
     // DENR: always force the range to (currentYear - 10) through currentYear,
     // overriding whatever the user typed in the year field.
-    if (paymentForm.computationType === 'denr') {
+    if (resolvedComputationType === 'denr') {
       const denrStart = currentYear - 10;
       const denrEnd = currentYear;
       const denrLabel = `${denrStart}-${denrEnd}`;
 
       // Auto-fill AV from property for 2016+
       const avToUse = prop.assessed_value;
-      const result = calculateTaxForRange(denrStart, denrEnd, prop, 'denr', avToUse);
+      const result = calculateTaxForRange(
+        denrStart,
+        denrEnd,
+        prop,
+        'denr',
+        avToUse,
+        getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+        customComputationTypes
+      );
 
       setPaymentForm(prev => ({
         ...prev,
@@ -1379,7 +1405,15 @@ export default function AdminPanel() {
     }
 
     const manualAV = parseFloat(paymentForm.assessed_value);
-    const result = calculateTaxForRange(startYear, endYear, prop, paymentForm.computationType, isNaN(manualAV) ? undefined : manualAV);
+    const result = calculateTaxForRange(
+      startYear,
+      endYear,
+      prop,
+      resolvedComputationType,
+      isNaN(manualAV) ? undefined : manualAV,
+      getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+      customComputationTypes
+    );
 
     setPaymentForm(prev => ({
       ...prev,
@@ -1390,14 +1424,18 @@ export default function AdminPanel() {
       amount: result.amount
     }));
 
-  }, [paymentForm.year, paymentForm.computationType, paymentForm.assessed_value, selectedComputationPropertyId, paymentQueue]);
-  // Recalculate all payment queue items when computation type changes
+  }, [paymentForm.year, paymentForm.computationType, paymentForm.assessed_value, selectedComputationPropertyId, paymentQueue, resolvedComputationType]);
+  // Recalculate all payment queue items when interest/discount toggles change
   useEffect(() => {
     setPaymentQueue(prevQueue => {
       if (prevQueue.length === 0) return prevQueue;
 
       // Check if any items actually need updating to prevent infinite loops
-      const needsUpdate = prevQueue.some(item => item.computationType !== paymentForm.computationType);
+      const needsUpdate = prevQueue.some(item =>
+        item.computationType !== paymentForm.computationType ||
+        item.applyInterest !== paymentForm.applyInterest ||
+        item.applyDiscount !== paymentForm.applyDiscount
+      );
       if (!needsUpdate) return prevQueue;
 
       // Recalculate all items in payment queue with current computation type
@@ -1414,8 +1452,10 @@ export default function AdminPanel() {
           startYear,
           endYear,
           prop,
-          paymentForm.computationType,
-          isNaN(avToUse) ? undefined : avToUse
+          item.computationType || paymentForm.computationType,
+          isNaN(avToUse) ? undefined : avToUse,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          customComputationTypes
         );
 
         return {
@@ -1425,11 +1465,13 @@ export default function AdminPanel() {
           interest: result.interest,
           discount: result.discount,
           computationType: paymentForm.computationType,
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
           amount: Number(result.amount)
         };
       });
     });
-  }, [paymentForm.computationType, properties]);
+  }, [paymentForm.computationType, paymentForm.applyInterest, paymentForm.applyDiscount, properties, customComputationTypes]);
   const handleGenerateRanges = () => {
     if (!selectedComputationPropertyId || !paymentForm.year) return;
 
@@ -1453,7 +1495,7 @@ export default function AdminPanel() {
     if (!prop) return;
 
     // 2. STRICT DENR Override: ALWAYS force to exactly 10 years ago up to current year
-    if (paymentForm.computationType === 'denr') {
+    if (resolvedComputationType === 'denr') {
       startYear = currentYear - 10; // Always becomes 2016
       endYearLimit = currentYear;   // Always becomes 2026
     }
@@ -1468,7 +1510,15 @@ export default function AdminPanel() {
       if (range) {
         const endYear = Math.min(range[1], endYearLimit);
         const avToUse = currentStart >= 2016 ? prop.assessed_value : (paymentForm.assessed_value ? parseFloat(paymentForm.assessed_value) : 0);
-        const result = calculateTaxForRange(currentStart, endYear, prop, paymentForm.computationType, isNaN(avToUse) ? 0 : avToUse);
+        const result = calculateTaxForRange(
+          currentStart,
+          endYear,
+          prop,
+          resolvedComputationType,
+          isNaN(avToUse) ? 0 : avToUse,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          customComputationTypes
+        );
 
         generatedItems.push({
           property_id: parseInt(selectedComputationPropertyId),
@@ -1479,12 +1529,22 @@ export default function AdminPanel() {
           ...result,
           or_no: paymentForm.or_no,
           computationType: paymentForm.computationType,
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
           amount: Number(result.amount)
         });
         currentStart = endYear + 1;
       } else {
         const avToUse = currentStart >= 2016 ? prop.assessed_value : (paymentForm.assessed_value ? parseFloat(paymentForm.assessed_value) : 0);
-        const result = calculateTaxForRange(currentStart, currentStart, prop, paymentForm.computationType, isNaN(avToUse) ? 0 : avToUse);
+        const result = calculateTaxForRange(
+          currentStart,
+          currentStart,
+          prop,
+          resolvedComputationType,
+          isNaN(avToUse) ? 0 : avToUse,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          customComputationTypes
+        );
 
         generatedItems.push({
           property_id: parseInt(selectedComputationPropertyId),
@@ -1495,6 +1555,8 @@ export default function AdminPanel() {
           ...result,
           or_no: paymentForm.or_no,
           computationType: paymentForm.computationType,
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
           amount: Number(result.amount)
         });
         currentStart++;
@@ -1541,7 +1603,9 @@ export default function AdminPanel() {
       interest: '',
       discount: '',
       amount: '',
-      computationType: prev.computationType // <-- Preserve the selected computation type
+      computationType: prev.computationType, // <-- Preserve the selected computation type
+      applyInterest: prev.applyInterest,
+      applyDiscount: prev.applyDiscount
     }));
   };
 
@@ -1564,7 +1628,18 @@ export default function AdminPanel() {
     }
 
     const manualAV = parseFloat(newValue.replace(/,/g, ''));
-    const result = calculateTaxForRange(startYear, endYear, prop, item.computationType || paymentForm.computationType, isNaN(manualAV) ? 0 : manualAV);
+    const result = calculateTaxForRange(
+      startYear,
+      endYear,
+      prop,
+      item.computationType || paymentForm.computationType,
+      isNaN(manualAV) ? 0 : manualAV,
+      getCalculationOptions(
+        item.applyInterest ?? paymentForm.applyInterest,
+        item.applyDiscount ?? paymentForm.applyDiscount
+      ),
+      customComputationTypes
+    );
 
     newQueue[index] = {
       ...item,
@@ -1573,6 +1648,8 @@ export default function AdminPanel() {
       sef_tax: result.sef_tax,
       interest: result.interest,
       discount: result.discount,
+      applyInterest: item.applyInterest ?? paymentForm.applyInterest,
+      applyDiscount: item.applyDiscount ?? paymentForm.applyDiscount,
       amount: Number(result.amount)
     };
 
@@ -1628,12 +1705,25 @@ export default function AdminPanel() {
         }
 
         const manualAV = parseFloat(value);
-        const result = calculateTaxForRange(startYear, endYear, prop, item.computationType, isNaN(manualAV) ? 0 : manualAV);
+        const result = calculateTaxForRange(
+          startYear,
+          endYear,
+          prop,
+          item.computationType,
+          isNaN(manualAV) ? 0 : manualAV,
+          getCalculationOptions(
+            item.applyInterest ?? paymentForm.applyInterest,
+            item.applyDiscount ?? paymentForm.applyDiscount
+          ),
+          customComputationTypes
+        );
 
         item.basic_tax = result.basic_tax;
         item.sef_tax = result.sef_tax;
         item.interest = result.interest;
         item.discount = result.discount;
+        item.applyInterest = item.applyInterest ?? paymentForm.applyInterest;
+        item.applyDiscount = item.applyDiscount ?? paymentForm.applyDiscount;
         item.amount = Number(result.amount);
       }
     }
@@ -2075,8 +2165,18 @@ export default function AdminPanel() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const confirmed = window.confirm(
+      'This import will replace the current property, owner, assessment, and payment tables. Continue only if you have a fresh backup.'
+    );
+
+    if (!confirmed) {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('confirmReplaceExistingData', 'true');
 
     try {
       setIsUploading(true);
@@ -2301,6 +2401,12 @@ export default function AdminPanel() {
                   <span className="text-xs text-gray-400">{searchResults.length} {searchResults.length === 1 ? 'Property' : 'Properties'} Found</span>
                 </div>
 
+                {searchResults.some(prop => (taggingPinMeta.get(prop.id)?.count || 1) > 1) && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+                    Duplicate PINs are allowed here when the roll contains separate records for the same PIN, such as different owners, status entries, or classifications.
+                  </div>
+                )}
+
                 <div className="space-y-1 max-h-[700px] overflow-y-auto pr-2 custom-scrollbar">
                   {searchResults.length === 0 && (
                     <div className="text-center py-20 border-2 border-dashed rounded-xl border-gray-100">
@@ -2310,11 +2416,15 @@ export default function AdminPanel() {
                   )}
                   {searchResults.map(prop => {
                     const isSelected = selectedProperties.some(p => p.id === prop.id);
+                    const pinMeta = taggingPinMeta.get(prop.id) || { count: 1, index: 1 };
+                    const isDuplicatePin = pinMeta.count > 1;
                     return (
                       <div
                         key={prop.id}
                         className={`p-2 border transition-all rounded-none cursor-pointer hover:shadow-md ${isSelected
                           ? 'border-blue-500 bg-blue-50/50 ring-1 ring-blue-500'
+                          : isDuplicatePin
+                            ? 'border-amber-200 bg-amber-50/40'
                           : 'border-gray-100 bg-white'
                           }`}
                         onClick={() => togglePropertySelection(prop)}
@@ -2329,6 +2439,11 @@ export default function AdminPanel() {
                               {/* 1. Wrapped the name and badges in a flex container */}
                               <div className="flex items-center gap-2 flex-wrap">
                                 <h3 className="font-bold text-gray-900 text-xs">{prop.registered_owner_name}</h3>
+                                {isDuplicatePin && (
+                                  <span className="px-1.5 py-0 text-[9px] font-extrabold uppercase tracking-wider rounded-full border border-amber-200 bg-amber-100 text-amber-800">
+                                    Duplicate PIN record {pinMeta.index} of {pinMeta.count}
+                                  </span>
+                                )}
 
                                 <div className="flex items-center gap-1 flex-wrap">
                                   {/* Status Badge */}
@@ -2370,6 +2485,11 @@ export default function AdminPanel() {
                                 <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded">
                                   PIN: {prop.pin}
                                 </p>
+                                {isDuplicatePin && (
+                                  <p className="text-[9px] font-semibold text-amber-700 bg-amber-50 px-1 py-0 rounded border border-amber-200">
+                                    Same PIN has {pinMeta.count} records in this result set
+                                  </p>
+                                )}
                                 <p className="text-[9px] font-mono text-gray-400 bg-gray-50 px-1 py-0 rounded">
                                   Old PIN: {prop.old_pin || '-'}
                                 </p>
@@ -2648,23 +2768,30 @@ export default function AdminPanel() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-4">
                   <div className="space-y-2">
-                    <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Computation Type</Label>
-                    <Select
-                      value={paymentForm.computationType}
-                      onValueChange={v => setPaymentForm({ ...paymentForm, computationType: v })}
-                    >
-                      <SelectTrigger className="w-full h-12 rounded-none border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 shadow-none hover:border-blue-400 focus:ring-blue-500/20">
-                        <SelectValue placeholder="Select Type..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="standard">Standard</SelectItem>
-                        <SelectItem value="rpvara" disabled={getPHTimeNow() > new Date('2026-07-05T00:00:00Z')}>
-                          RPVARA {getPHTimeNow() > new Date('2026-07-05T00:00:00Z') ? '(EXPIRED)' : ''}
-                        </SelectItem>
-                        <SelectItem value="denr">DENR</SelectItem>
-                        <SelectItem value="share">Share Area</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <Label>Rule</Label>
+                    <div className="flex flex-wrap gap-2">
+                      {availableComputationRules.map(rule => {
+                        const isDisabled = !isRuleEffective(rule);
+                        const isActive = paymentForm.computationType === rule.value;
+
+                        return (
+                          <Button
+                            key={rule.value}
+                            type="button"
+                            variant={isActive ? 'default' : 'outline'}
+                            disabled={isDisabled}
+                            onClick={() => setPaymentForm(prev => ({ ...prev, computationType: rule.value }))}
+                            className="h-9 rounded-full px-4 text-xs font-semibold"
+                          >
+                            {rule.label}
+                            {isDisabled ? ' (Inactive)' : ''}
+                          </Button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      Current-year and advance-payment discounts still follow the selected rule and the app&apos;s existing year logic.
+                    </p>
                   </div>
 
                   <div className="space-y-2">
@@ -2708,6 +2835,20 @@ export default function AdminPanel() {
                       </div>
                     </div>
                   </div>
+
+                  {uploadedSoaSummary && (
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 space-y-2 text-sm">
+                      <h4 className="font-semibold text-emerald-900">Extracted From SOA</h4>
+                      <div className="grid grid-cols-1 gap-1 text-emerald-950">
+                        <div><span className="font-medium">Name:</span> {uploadedSoaSummary.ownerName || 'Not found'}</div>
+                        <div><span className="font-medium">PIN:</span> {uploadedSoaSummary.pin || 'Not found'}</div>
+                        <div><span className="font-medium">Lot#:</span> {uploadedSoaSummary.lotNo || 'Not found'}</div>
+                        <div><span className="font-medium">Area:</span> {uploadedSoaSummary.area || 'Not found'}</div>
+                        <div><span className="font-medium">Year:</span> {uploadedSoaSummary.groupedRanges.map(range => range.startYear === range.endYear ? `${range.startYear}` : `${range.startYear}-${range.endYear}`).join(', ') || 'Not found'}</div>
+                        <div><span className="font-medium">Assessed Value:</span> {uploadedSoaSummary.groupedRanges.map(range => range.assessedValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })).join(' | ') || 'Not found'}</div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-4">
@@ -2789,8 +2930,28 @@ export default function AdminPanel() {
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Assessed<br />Value</th>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Basic<br />Tax</th>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">SEF<br />Tax</th>
-                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Interest</th>
-                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Discount</th>
+                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">
+                      <label className="inline-flex items-center justify-end gap-2 w-full cursor-pointer">
+                        <span>Interest</span>
+                        <input
+                          type="checkbox"
+                          checked={paymentForm.applyInterest}
+                          onChange={e => setPaymentForm(prev => ({ ...prev, applyInterest: e.target.checked }))}
+                          className="h-4 w-4"
+                        />
+                      </label>
+                    </th>
+                    <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">
+                      <label className="inline-flex items-center justify-end gap-2 w-full cursor-pointer">
+                        <span>Discount</span>
+                        <input
+                          type="checkbox"
+                          checked={paymentForm.applyDiscount}
+                          onChange={e => setPaymentForm(prev => ({ ...prev, applyDiscount: e.target.checked }))}
+                          className="h-4 w-4"
+                        />
+                      </label>
+                    </th>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Total</th>
                     <th className="px-4 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap text-center align-bottom">Action</th>
                   </tr>
@@ -3246,6 +3407,206 @@ export default function AdminPanel() {
           <MessagingPanel />
         )}
 
+        {activeSettingsTab === 'manage-computation-types' && user?.username.toLowerCase() === 'manlie' && (
+          <Card className="border-none shadow-sm">
+            <CardHeader>
+              <CardTitle>RPT Computation Types</CardTitle>
+              <CardDescription>
+                Add custom computation labels and map them to an existing base rule until a new formula is needed.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-8">
+              <form onSubmit={handleCreateCustomComputationType} className="space-y-4 max-w-2xl">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Display Name</Label>
+                    <Input
+                      placeholder="e.g. Special Amnesty 2027"
+                      value={customComputationForm.label}
+                      onChange={e => setCustomComputationForm(prev => ({ ...prev, label: e.target.value }))}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Base Rule</Label>
+                    <Select
+                      value={customComputationForm.base_type}
+                      onValueChange={value => setCustomComputationForm(prev => ({
+                        ...prev,
+                        base_type: value as 'standard' | 'rpvara' | 'denr' | 'share'
+                      }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select base rule" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="standard">Standard</SelectItem>
+                        <SelectItem value="rpvara">RPVARA</SelectItem>
+                        <SelectItem value="denr">DENR</SelectItem>
+                        <SelectItem value="share">Share Area</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Special Hook</Label>
+                    <Select
+                      value={customComputationForm.special_case_hook}
+                      onValueChange={value => setCustomComputationForm(prev => ({
+                        ...prev,
+                        special_case_hook: value as 'none' | 'rpvara_2024_half' | 'denr_10_year_window'
+                      }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select hook" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None</SelectItem>
+                        <SelectItem value="rpvara_2024_half">RPVARA 2024 Half-Year</SelectItem>
+                        <SelectItem value="denr_10_year_window">DENR 10-Year Window</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Effective From</Label>
+                    <Input
+                      type="date"
+                      value={customComputationForm.effective_from}
+                      onChange={e => setCustomComputationForm(prev => ({ ...prev, effective_from: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs font-semibold">Effective To</Label>
+                    <Input
+                      type="date"
+                      value={customComputationForm.effective_to}
+                      onChange={e => setCustomComputationForm(prev => ({ ...prev, effective_to: e.target.value }))}
+                    />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={customComputationForm.is_active}
+                    onChange={e => setCustomComputationForm(prev => ({ ...prev, is_active: e.target.checked }))}
+                    className="h-4 w-4"
+                  />
+                  Rule is active
+                </label>
+                <div className="space-y-2">
+                  <Label className="text-xs font-semibold">Notes</Label>
+                  <textarea
+                    placeholder="Optional notes about when this computation type should be used."
+                    value={customComputationForm.description}
+                    onChange={e => setCustomComputationForm(prev => ({ ...prev, description: e.target.value }))}
+                    className="w-full min-h-[96px] rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs font-semibold">Rule Config (JSON)</Label>
+                  <textarea
+                    value={customComputationForm.config_json}
+                    onChange={e => setCustomComputationForm(prev => ({ ...prev, config_json: e.target.value }))}
+                    className="w-full min-h-[220px] rounded-md border border-gray-300 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="text-xs text-gray-500">
+                    Edit rates, caps, delinquent waivers, and year-window settings here. This is what powers the rule formula.
+                  </p>
+                </div>
+                {customComputationStatus && (
+                  <div className={`p-3 rounded-md text-sm ${customComputationStatus.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                    {customComputationStatus.text}
+                  </div>
+                )}
+                <div className="flex gap-3">
+                  <Button type="submit" className="bg-blue-600 hover:bg-blue-700">
+                    {editingComputationTypeId ? 'Save Rule' : 'Add Rule'}
+                  </Button>
+                  {editingComputationTypeId && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        setEditingComputationTypeId(null);
+                        setCustomComputationForm({
+                          label: '',
+                          base_type: 'standard',
+                          description: '',
+                          special_case_hook: 'none',
+                          effective_from: '',
+                          effective_to: '',
+                          is_active: true,
+                          config_json: JSON.stringify(DEFAULT_COMPUTATION_RULES[0].config, null, 2)
+                        });
+                        setCustomComputationStatus(null);
+                      }}
+                    >
+                      Cancel Edit
+                    </Button>
+                  )}
+                </div>
+              </form>
+
+              <div className="overflow-hidden border border-gray-100 rounded-xl">
+                <Table>
+                  <TableHeader className="bg-gray-50/50">
+                    <TableRow>
+                      <TableHead>Name</TableHead>
+                      <TableHead>Base Rule</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Effectivity</TableHead>
+                      <TableHead>Hook</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {customComputationTypes.map(type => (
+                      <TableRow key={type.id}>
+                        <TableCell className="font-medium">{type.label}</TableCell>
+                        <TableCell className="uppercase text-xs text-gray-600">{type.base_type}</TableCell>
+                        <TableCell className="text-sm text-gray-500">{type.is_active ? 'Active' : 'Inactive'}</TableCell>
+                        <TableCell className="text-sm text-gray-500">
+                          {[type.effective_from || 'Any time', type.effective_to || 'No end'].join(' to ')}
+                        </TableCell>
+                        <TableCell className="text-xs text-gray-500">{type.special_case_hook}</TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex justify-end gap-2">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => loadComputationRuleIntoForm(type)}
+                            >
+                              Edit
+                            </Button>
+                            {!type.is_builtin && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="text-red-500 hover:text-red-600 hover:bg-red-50"
+                                onClick={() => handleDeleteCustomComputationType(type.id!)}
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </Button>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {customComputationTypes.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={6} className="text-center py-8 text-gray-400">
+                          No computation rules found.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {activeSettingsTab === 'manage-barangays' && user?.username.toLowerCase() === 'manlie' && (
           <Card className="border-none shadow-sm">
             <CardHeader>
@@ -3432,21 +3793,67 @@ export default function AdminPanel() {
   const renderRPTAR = () => (
     <div className="space-y-6">
       <Card className="border-none shadow-sm">
-        <CardContent className="pt-6">
-          <form onSubmit={(e) => { e.preventDefault(); syncGlobalSearch(rptarSearchQuery, true); }} className="flex gap-2 max-w-2xl">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <Input
-                placeholder="Search PIN, Owner, or Taxpayer..."
-                className="pl-9 h-9 rounded-none border-gray-200 text-xs"
-                value={rptarSearchQuery}
-                onChange={(e) => syncGlobalSearch(e.target.value)}
-              />
+        <CardContent className="pt-6 space-y-3">
+          <form onSubmit={(e) => { e.preventDefault(); syncGlobalSearch(rptarSearchQuery, true); }} className="flex flex-col gap-3 xl:flex-row xl:items-center">
+            <div className="flex gap-2 max-w-2xl w-full">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <Input
+                  placeholder="Search PIN, Owner, or Taxpayer..."
+                  className="pl-9 h-9 rounded-none border-gray-200 text-xs"
+                  value={rptarSearchQuery}
+                  onChange={(e) => syncGlobalSearch(e.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={isRptarSearching} className="h-9 px-6 rounded-none bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold text-xs transition-all">
+                {isRptarSearching ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Search'}
+              </Button>
             </div>
-            <Button type="submit" disabled={isRptarSearching} className="h-9 px-6 rounded-none bg-blue-600 hover:bg-blue-700 shadow-sm font-semibold text-xs transition-all">
-              {isRptarSearching ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Search'}
-            </Button>
+
+            <div className="flex items-center gap-2 xl:ml-auto">
+              <input
+                type="file"
+                ref={rptarPdfInputRef}
+                className="hidden"
+                accept=".pdf"
+                multiple
+                onChange={handleRptarPdfUpload}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => rptarPdfInputRef.current?.click()}
+                disabled={isRptarPdfProcessing || rptarSearchResults.length === 0}
+                className="h-9 gap-2 rounded-none text-xs font-semibold"
+              >
+                {isRptarPdfProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3.5 h-3.5" />}
+                Upload SOAs
+              </Button>
+              {Object.keys(rptarUploadedSoasByProperty).length > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setRptarUploadedSoasByProperty({});
+                    setRptarUploadStatus(null);
+                  }}
+                  className="h-9 rounded-none px-3 text-xs text-gray-500 hover:text-red-600"
+                >
+                  Clear Imported SOAs
+                </Button>
+              )}
+            </div>
           </form>
+          <div className="flex flex-col gap-1 text-xs">
+            <span className="text-gray-500">
+              RPT Computation stays single-PDF. RPTAR can accept multiple SOA PDFs after search and place each matched account inline in history.
+            </span>
+            {rptarUploadStatus && (
+              <span className={rptarUploadStatus.type === 'success' ? 'text-emerald-700' : 'text-red-600'}>
+                {rptarUploadStatus.text}
+              </span>
+            )}
+          </div>
         </CardContent>
       </Card>
 
@@ -3454,6 +3861,11 @@ export default function AdminPanel() {
         <Card className="border-none shadow-sm overflow-hidden">
           <CardHeader className="bg-gray-50 border-b border-gray-200">
             <CardTitle className="text-lg font-bold text-gray-900">Search Result{rptarSearchResults.length > 1 ? 's' : ''}</CardTitle>
+            {rptarSearchResults.some(prop => (rptarPinMeta.get(prop.id)?.count || 1) > 1) && (
+              <CardDescription>
+                Some results intentionally share the same PIN. Each row is a separate uploaded record and may differ by owner, status, classification, or taxability.
+              </CardDescription>
+            )}
           </CardHeader>
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
@@ -3472,14 +3884,22 @@ export default function AdminPanel() {
               <tbody className="bg-white">
                 {rptarSearchResults
                   .filter(p => !rptarSelectedPropertyId || p.id === rptarSelectedPropertyId)
-                  .map((prop) => (
+                  .map((prop) => {
+                    const pinMeta = rptarPinMeta.get(prop.id) || { count: 1, index: 1 };
+                    const isDuplicatePin = pinMeta.count > 1;
+                    return (
                     <React.Fragment key={prop.id}>
                       <tr
-                        className={`transition-colors border-t border-gray-100 ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50/50' : 'hover:bg-gray-50/50'}`}
+                        className={`transition-colors border-t border-gray-100 ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50/50' : isDuplicatePin ? 'bg-amber-50/30 hover:bg-amber-50/60' : 'hover:bg-gray-50/50'}`}
                       >
                         <td className="px-6 py-3 text-sm font-medium text-gray-700 whitespace-nowrap align-top">
                           <div className="flex flex-col items-start gap-1">
                             <span>{prop.kind || prop.description || '-'}</span>
+                            {isDuplicatePin && (
+                              <span className="inline-block px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-amber-100 text-amber-800 border border-amber-200">
+                                Record {pinMeta.index} of {pinMeta.count} for this PIN
+                              </span>
+                            )}
                             {prop.classification && (
                               <span className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-purple-50 text-purple-700 border border-purple-200">
                                 {prop.classification}
@@ -3532,7 +3952,14 @@ export default function AdminPanel() {
                             <span className="text-gray-400">Not Tagged</span>
                           )}
                         </td>
-                        <td className="px-6 py-3 font-mono text-sm text-gray-600 whitespace-nowrap align-top">{prop.pin}</td>
+                        <td className="px-6 py-3 font-mono text-sm text-gray-600 whitespace-nowrap align-top">
+                          <div className="flex flex-col items-start gap-1">
+                            <span>{prop.pin}</span>
+                            {isDuplicatePin && (
+                              <span className="text-[10px] font-semibold text-amber-700">Shared PIN group with {pinMeta.count} records</span>
+                            )}
+                          </div>
+                        </td>
                         <td className="px-6 py-3 font-mono text-sm text-gray-600 whitespace-nowrap align-top">{prop.old_pin || '-'}</td>
                         <td className="px-6 py-3 text-sm text-gray-600 whitespace-nowrap align-top">{prop.lot_no || '-'}</td>
                         <td className="px-6 py-3 font-mono text-sm text-gray-600 text-right whitespace-nowrap align-top">{prop.total_area || '-'}</td>
@@ -3545,8 +3972,15 @@ export default function AdminPanel() {
                           </button>
                         </td>
                       </tr>
+                      {isDuplicatePin && (
+                        <tr className="bg-amber-50/40 border-t border-amber-100">
+                          <td colSpan={8} className="px-6 py-2 text-xs text-amber-900">
+                            This row is one of {pinMeta.count} records with PIN {prop.pin}. Use owner, status, classification, and taxability to distinguish which record you want.
+                          </td>
+                        </tr>
+                      )}
                     </React.Fragment>
-                  ))}
+                  )})}
               </tbody>
             </table>
           </div>
@@ -3561,43 +3995,65 @@ export default function AdminPanel() {
                 <History className="w-5 h-5 text-gray-700" />
                 Account History
               </CardTitle>
+              <div className="text-xs text-gray-500">
+                {selectedRptarUploadedSoas.length > 0
+                  ? `${selectedRptarUploadedSoas.length} imported SOA file${selectedRptarUploadedSoas.length === 1 ? '' : 's'} attached`
+                  : 'No imported SOA attached'}
+              </div>
             </div>
           </CardHeader>
           <CardContent className="pt-0 overflow-x-auto">
-              <table className="w-full text-xs text-left">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  {/* Main header row */}
-                  <tr>
-                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap border-r border-gray-200">TD No.</th>
-                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap border-r border-gray-200">Year<br />Covered</th>
-                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-right border-r border-gray-200">Assessed<br />Value</th>
-                    <th colSpan={3} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Collectibles</th>
-                    <th colSpan={7} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Collected</th>
-                    <th colSpan={2} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Balance</th>
-                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap">Remarks</th>
+              {selectedRptarUploadedSoas.length > 0 && (
+                <div className="m-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4 space-y-2 text-sm">
+                  <h4 className="font-semibold text-emerald-900">Imported SOAs For This Record</h4>
+                  <div className="space-y-2 text-emerald-950">
+                    {selectedRptarUploadedSoas.map((batch, index) => (
+                      <div key={`${batch.fileName}-${index}`} className="rounded border border-emerald-200 bg-white/70 px-3 py-2">
+                        <div className="font-semibold">{batch.fileName}</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-1 text-xs mt-1">
+                          <div><span className="font-medium">Registered Owner:</span> {batch.summary.ownerName || 'Not found'}</div>
+                          <div><span className="font-medium">PIN:</span> {batch.summary.pin || 'Not found'}</div>
+                          <div><span className="font-medium">Lot#:</span> {batch.summary.lotNo || 'Not found'}</div>
+                          <div><span className="font-medium">Area:</span> {batch.summary.area || 'Not found'}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <table className="w-full min-w-[1220px] text-xs text-left border-separate border-spacing-0">
+                <thead className="bg-slate-50 text-slate-700">
+                  <tr className="border-b border-slate-200">
+                    <th rowSpan={2} className="px-3 py-2.5 align-middle text-[11px] font-bold uppercase tracking-[0.18em] whitespace-nowrap border-r border-slate-200 bg-slate-50">TD No.</th>
+                    <th rowSpan={2} className="px-3 py-2.5 align-middle text-[11px] font-bold uppercase tracking-[0.18em] whitespace-nowrap border-r border-slate-200 bg-slate-50">Year Covered</th>
+                    <th rowSpan={2} className="px-3 py-2.5 align-middle text-[11px] font-bold uppercase tracking-[0.18em] text-right whitespace-nowrap border-r border-slate-200 bg-slate-50">Assessed Value</th>
+                    <th colSpan={3} className="px-3 pt-2.5 pb-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-center border-r border-slate-200 bg-slate-50">Collectibles</th>
+                    <th colSpan={7} className="px-3 pt-2.5 pb-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-center border-r border-slate-200 bg-slate-50">Collected</th>
+                    <th colSpan={2} className="px-3 pt-2.5 pb-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-center border-r border-slate-200 bg-slate-50">Balance</th>
+                    <th rowSpan={2} className="px-3 py-2.5 align-middle text-[11px] font-bold uppercase tracking-[0.18em] whitespace-nowrap bg-slate-50">Remarks</th>
                   </tr>
-                  {/* Sub-header row */}
-                  <tr className="border-t border-gray-200">
-                    <th colSpan={3}></th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Total</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Date</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">OR No.</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Interest</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Discount</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Total</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs"></th>
+                  <tr className="border-t border-slate-200 border-b border-slate-200">
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Basic Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">SEF Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-200 bg-white">Total</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Date</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">OR No.</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Basic Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">SEF Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Interest</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Discount</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-200 bg-white">Total</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Basic Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-200 bg-white">SEF Tax</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {(() => {
                     const prop = rptarSearchResults.find(p => p.id === rptarSelectedPropertyId);
-                    const displayPayments = rptarPayments.length > 0 ? rptarPayments : (prop ? [{
+                    const importedSoaRows = selectedRptarUploadedSoas.flatMap(batch => batch.rows);
+                    const displayPayments = importedSoaRows.length > 0
+                      ? [...importedSoaRows, ...rptarPayments]
+                      : rptarPayments.length > 0 ? rptarPayments : (prop ? [{
                       id: 'synthetic-unpaid',
                       year: new Date().getFullYear().toString(),
                       assessed_value: prop.total_assessed_value || prop.assessed_value || 0,
@@ -3636,27 +4092,27 @@ export default function AdminPanel() {
                     const balanceSef = collectiblesSef - collectedSef;
                     return (
                       <tr key={payment.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-3 py-3 font-medium text-gray-900 text-xs border-r border-gray-100">{payment.td_no || prop?.td_no || '-'}</td>
-                        <td className="px-3 py-3 text-gray-600 text-xs border-r border-gray-100">{payment.year || '-'}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">
+                        <td className="px-3 py-2.5 font-medium text-gray-900 text-xs border-r border-gray-100">{payment.td_no || prop?.td_no || '-'}</td>
+                        <td className="px-3 py-2.5 text-gray-600 text-xs border-r border-gray-100">{payment.year || '-'}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">
                           {payment.assessed_value ? parseFloat(String(payment.assessed_value)).toLocaleString(undefined, { minimumFractionDigits: 2 }) : '---'}
                         </td>
                         {/* Collectibles */}
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{collectiblesTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{collectiblesTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         {/* Collected */}
-                        <td className="px-3 py-3 text-right font-medium text-gray-600 text-xs border-r border-gray-100">{payment.payment_date ? new Date(payment.payment_date).toLocaleDateString() : '---'}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-600 text-xs border-r border-gray-100">{payment.or_no || '---'}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.discount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{(collectedBasic + collectedSef + parseFloat(String(payment.interest || 0)) - parseFloat(String(payment.discount || 0))).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-medium text-gray-600 text-xs border-r border-gray-100">{payment.payment_date ? new Date(payment.payment_date).toLocaleDateString() : '---'}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-600 text-xs border-r border-gray-100">{payment.or_no || '---'}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.discount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{(collectedBasic + collectedSef + parseFloat(String(payment.interest || 0)) - parseFloat(String(payment.discount || 0))).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         {/* Balance */}
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-gray-500 text-xs italic">{payment.remarks || '-'}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-gray-500 text-xs italic">{payment.remarks || '-'}</td>
                       </tr>
                     );
                   });
@@ -3705,158 +4161,58 @@ export default function AdminPanel() {
         return;
       }
 
-      // Extract and verify PIN from PDF
-      // PIN patterns: 028-09-0001-001-01, 028-09-0001-001-01-1001, 028-09-0001-001-(01)-1001, 028.09.0001.001.01-2001, 028.09.0001.001.(01)-2001
-      const pinRegex = /028[-.]09[-.](\d{4})[-.](\d{3})[-.](?:\()?(\d{2})(?:\))?(?:[-.](\d{4}))?/g;
-      let extractedPin: string | null = null;
-      let pinMatch;
+      const extractedSoa = extractSoaData(fullText);
+      setUploadedSoaSummary(extractedSoa);
 
-      while ((pinMatch = pinRegex.exec(fullText)) !== null) {
-        const part2 = pinMatch[1]; // 0001
-        const part3 = pinMatch[2]; // 001
-        const part4 = pinMatch[3]; // 01
-        const part5 = pinMatch[4]; // 1001 or 2001 (optional)
-
-        // Determine separator (dash or dot) from the matched text
-        const matchedText = pinMatch[0];
-        const separator = matchedText.includes('.') ? '.' : '-';
-
-        if (part5) {
-          // Full format with year/number: 028-09-0001-001-01-1001
-          extractedPin = `028${separator}09${separator}${part2}${separator}${part3}${separator}${part4}${separator}${part5}`;
-        } else {
-          // Basic format without year: 028-09-0001-001-01
-          extractedPin = `028${separator}09${separator}${part2}${separator}${part3}${separator}${part4}`;
-        }
-        break; // Use the first match
+      const matchIssues = getSoaMatchIssues(extractedSoa, prop);
+      if (matchIssues.length > 0) {
+        alert(`SOA does not match the selected property.\n\n${matchIssues.join('\n')}`);
+        return;
       }
 
-      // Verify PIN matches
-      if (extractedPin) {
-        const normalizedExtracted = extractedPin.replace(/\./g, '-').toUpperCase();
-        const normalizedProperty = prop.pin.replace(/\./g, '-').toUpperCase();
-
-        if (normalizedExtracted !== normalizedProperty) {
-          alert(`PIN Mismatch!\nPDF PIN: ${extractedPin}\nProperty PIN: ${prop.pin}\n\nPlease ensure you uploading the correct document for this property.`);
-          return;
-        }
-      } else {
-        alert("Warning: Could not find PIN in PDF. Proceeding with extraction.\nPlease manually verify this is the correct property document.");
-      }
-
-        // Proximity Search (Anchor-based) with Global De-duplication
-        // Identify large monetary amounts (Assessed Values) and check their surrounding context.
-        const moneyRegex = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{2}))\b/g;
-        const yearEntries: Array<{ year: number; assessed_value: number; td_no?: string }> = [];
-        const uniqueEntryKeys = new Set<string>(); // Prevent duplicates
-        const normalizedPropPin = prop.pin.replace(/\./g, '-').toUpperCase();
-
-        let mMatch;
-        while ((mMatch = moneyRegex.exec(fullText)) !== null) {
-          const valStr = mMatch[1];
-          const value = parseFloat(valStr.replace(/,/g, ''));
-
-          // Scan context window around the monetary anchor
-          const start = Math.max(0, mMatch.index - 120);
-          const end = Math.min(fullText.length, mMatch.index + 120);
-          const window = fullText.substring(start, end);
-
-          // 1. Find Years (1[9]... or 2[0]...)
-          const yearsFound = window.match(/\b(1[9]\d{2}|2[0]\d{2})\b/g) || [];
-          if (yearsFound.length === 0) continue;
-
-          // 2. Find TD# (Exclude PIN)
-          const tdMatches = window.match(/\b(\d{2,4}-\d{3,}[\d\-A-Z]*)\b/g) || [];
-          const tdStr = tdMatches.find(t => t.toUpperCase() !== normalizedPropPin) || (tdMatches.length > 0 ? tdMatches[0] : '');
-          if (!tdStr) continue;
-        
-
-          // 3. Handle Year or Range
-          const hasDash = /[\-–]/.test(window);
-          const yParts = Array.from(new Set(yearsFound)).map(y => parseInt(y)).sort((a, b) => a - b);
-          
-          const addEntry = (y: number) => {
-            const key = `${y}-${tdStr.toUpperCase()}-${value.toFixed(2)}`;
-            if (!uniqueEntryKeys.has(key)) {
-              uniqueEntryKeys.add(key);
-              yearEntries.push({ year: y, assessed_value: value, td_no: tdStr });
-            }
-          };
-
-          if (yParts.length >= 2 && hasDash) {
-            const startY = yParts[0];
-            const endY = yParts[yParts.length - 1];
-            for (let y = startY; y <= endY; y++) {
-              addEntry(y);
-            }
-          } else {
-            yParts.forEach(y => addEntry(y));
-          }
-        }
-
-      if (yearEntries.length === 0) {
+      if (extractedSoa.groupedRanges.length === 0) {
         alert("No valid entries found in the PDF.\n\nTroubleshooting:\n• Expected columns: TD#, Assessed Value, Year\n• Example: 001-0017-A 12,460.00 2003");
         return;
       }
 
-      // Sort by year
-      yearEntries.sort((a, b) => a.year - b.year);
-
-      // Group consecutive years with the same assessed value AND TD#
-      const groupedRanges: Array<{ startYear: number; endYear: number; assessed_value: number; td_no?: string }> = [];
-      let currentStart = yearEntries[0].year;
-      let currentAV = yearEntries[0].assessed_value;
-      let currentTD = yearEntries[0].td_no;
-
-      for (let i = 1; i <= yearEntries.length; i++) {
-        const nextEntry = yearEntries[i];
-
-        if (i === yearEntries.length || nextEntry.assessed_value !== currentAV || nextEntry.td_no !== currentTD || nextEntry.year !== yearEntries[i - 1].year + 1) {
-          // End of current group
-          const endYear = yearEntries[i - 1].year;
-          groupedRanges.push({
-            startYear: currentStart,
-            endYear: endYear,
-            assessed_value: currentAV,
-            td_no: currentTD
-          });
-
-          if (i < yearEntries.length) {
-            currentStart = nextEntry.year;
-            currentAV = nextEntry.assessed_value;
-            currentTD = nextEntry.td_no;
-          }
-        }
-      }
-
       // Create payment queue items from grouped ranges
       const newItems: any[] = [];
-      for (const range of groupedRanges) {
-        const result = calculateTaxForRange(range.startYear, range.endYear, prop, paymentForm.computationType, range.assessed_value);
+      for (const range of extractedSoa.groupedRanges) {
+        const result = calculateTaxForRange(
+          range.startYear,
+          range.endYear,
+          prop,
+          resolvedComputationType,
+          range.assessedValue,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          customComputationTypes
+        );
 
         newItems.push({
           property_id: parseInt(selectedComputationPropertyId),
           pin: prop.pin,
-          td_no: range.td_no,
+          td_no: prop.td_no,
           year: range.startYear === range.endYear ? range.startYear.toString() : `${range.startYear}-${range.endYear}`,
           yearCount: range.endYear - range.startYear + 1,
           computationType: paymentForm.computationType,
-          assessed_value: range.assessed_value.toString(),
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
+          assessed_value: range.assessedValue.toString(),
           basic_tax: result.basic_tax,
           sef_tax: result.sef_tax,
           interest: result.interest,
           discount: result.discount,
           amount: Number(result.amount),
           or_no: paymentForm.or_no,
-          remarks: range.td_no ? `TD#: ${range.td_no}` : '',
+          remarks: '',
           fromPdfExtraction: true
         });
       }
 
       if (newItems.length > 0) {
         // Derive the overall year range from extracted data and update the Year/Range input
-        const overallMin = groupedRanges.reduce((min, r) => Math.min(min, r.startYear), Infinity);
-        const overallMax = groupedRanges.reduce((max, r) => Math.max(max, r.endYear), -Infinity);
+        const overallMin = extractedSoa.groupedRanges.reduce((min, r) => Math.min(min, r.startYear), Infinity);
+        const overallMax = extractedSoa.groupedRanges.reduce((max, r) => Math.max(max, r.endYear), -Infinity);
         const rangeLabel = overallMin === overallMax ? `${overallMin}` : `${overallMin}-${overallMax}`;
 
         // Sum totals from all items (existing queue + new PDF items)
@@ -3878,7 +4234,11 @@ export default function AdminPanel() {
         }));
 
         // Store the extracted data for real-time recalculation
-        setExtractedPdfData(groupedRanges);
+        setExtractedPdfData(extractedSoa.groupedRanges.map(range => ({
+          startYear: range.startYear,
+          endYear: range.endYear,
+          assessed_value: range.assessedValue
+        })));
         setPaymentQueue(prev => [...prev, ...newItems]);
 
         // Save extracted data to assessments table so it persists for later payment
@@ -3907,7 +4267,15 @@ export default function AdminPanel() {
           }
         }
 
-        alert(`Successfully extracted and added ${newItems.length} year range(s) from SOA.\nGrouped by assessed value: ${newItems.length} group(s) created.`);
+        const ownerWarning =
+          extractedSoa.ownerName &&
+          normalizeOwnerName(extractedSoa.ownerName) !== normalizeOwnerName(prop.registered_owner_name)
+            ? `\n\nWarning: SOA Name is "${extractedSoa.ownerName}" while property owner is "${prop.registered_owner_name}". Please verify before payment.`
+            : '';
+
+        alert(
+          `Successfully extracted SOA data.\n\nRegistered Owner: ${extractedSoa.ownerName || 'Not found'}\nPIN: ${extractedSoa.pin || 'Not found'}\nLot#: ${extractedSoa.lotNo || 'Not found'}\nArea: ${extractedSoa.area || 'Not found'}\nYears: ${rangeLabel}\nEntries: ${newItems.length}${ownerWarning}`
+        );
       } else {
         alert("No valid ranges could be generated from the extracted years.");
       }
@@ -3918,6 +4286,132 @@ export default function AdminPanel() {
     } finally {
       setIsPdfProcessing(false);
       if (pdfInputRef.current) pdfInputRef.current.value = '';
+    }
+  };
+
+  const handleRptarPdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []) as File[];
+    if (files.length === 0) return;
+
+    if (rptarSearchResults.length === 0) {
+      setRptarUploadStatus({ type: 'error', text: 'Search properties first before uploading SOAs for RPTAR.' });
+      if (rptarPdfInputRef.current) rptarPdfInputRef.current.value = '';
+      return;
+    }
+
+    setIsRptarPdfProcessing(true);
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+      const uploadsByProperty: Record<number, RptarUploadedSoaBatch[]> = {};
+      const matchedMessages: string[] = [];
+      const failedMessages: string[] = [];
+      let nextSelectedPropertyId = rptarSelectedPropertyId;
+
+      for (const file of files) {
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        let fullText = '';
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          fullText += textContent.items.map((item: any) => (item as any).str || '').join(' ') + '\n';
+        }
+
+        if (!fullText.trim()) {
+          failedMessages.push(`${file.name}: PDF contains no readable text.`);
+          continue;
+        }
+
+        const extractedSoa = extractSoaData(fullText);
+        if (extractedSoa.tdGroupedRanges.length === 0) {
+          failedMessages.push(`${file.name}: no TD#, Year, and Assessed Value rows were found.`);
+          continue;
+        }
+
+        const matchedProperties = rptarSearchResults.filter(prop => getSoaMatchIssues(extractedSoa, prop).length === 0);
+        if (matchedProperties.length === 0) {
+          failedMessages.push(`${file.name}: no searched property matched the SOA fields.`);
+          continue;
+        }
+
+        if (matchedProperties.length > 1) {
+          failedMessages.push(`${file.name}: matched multiple properties. Narrow the search or open the exact record first.`);
+          continue;
+        }
+
+        const matchedProperty = matchedProperties[0];
+        const soaRows = extractedSoa.tdGroupedRanges.map((range, index) => ({
+          id: `rptar-soa-${matchedProperty.id}-${Date.now()}-${index}`,
+          td_no: range.tdNo,
+          year: range.startYear === range.endYear ? `${range.startYear}` : `${range.startYear}-${range.endYear}`,
+          assessed_value: range.assessedValue,
+          basic_tax: 0,
+          sef_tax: 0,
+          interest: 0,
+          discount: 0,
+          record_type: 'assessment',
+          remarks: `SOA: ${file.name}`
+        }));
+
+        if (!uploadsByProperty[matchedProperty.id]) {
+          uploadsByProperty[matchedProperty.id] = [];
+        }
+
+        uploadsByProperty[matchedProperty.id].push({
+          fileName: file.name,
+          summary: extractedSoa,
+          rows: soaRows
+        });
+
+        if (!nextSelectedPropertyId) {
+          nextSelectedPropertyId = matchedProperty.id;
+        }
+
+        matchedMessages.push(`${file.name} -> ${matchedProperty.registered_owner_name} (${matchedProperty.pin})`);
+      }
+
+      if (Object.keys(uploadsByProperty).length > 0) {
+        setRptarUploadedSoasByProperty(prev => {
+          const merged = { ...prev };
+          for (const [propertyIdText, batches] of Object.entries(uploadsByProperty)) {
+            const propertyId = Number(propertyIdText);
+            merged[propertyId] = [...(merged[propertyId] || []), ...batches];
+          }
+          return merged;
+        });
+      }
+
+      if (nextSelectedPropertyId) {
+        setRptarSelectedPropertyId(nextSelectedPropertyId);
+      }
+
+      if (matchedMessages.length > 0 && failedMessages.length === 0) {
+        setRptarUploadStatus({
+          type: 'success',
+          text: `${matchedMessages.length} SOA file${matchedMessages.length === 1 ? '' : 's'} matched and added to account history.`
+        });
+      } else if (matchedMessages.length > 0) {
+        setRptarUploadStatus({
+          type: 'success',
+          text: `${matchedMessages.length} SOA file${matchedMessages.length === 1 ? '' : 's'} added. ${failedMessages.length} file${failedMessages.length === 1 ? '' : 's'} need review.`
+        });
+      } else {
+        setRptarUploadStatus({
+          type: 'error',
+          text: failedMessages[0] || 'No SOA files could be matched to the current search results.'
+        });
+      }
+    } catch (err) {
+      console.error('RPTAR PDF processing error:', err);
+      setRptarUploadStatus({
+        type: 'error',
+        text: 'Failed to process one or more SOA files for RPTAR. Please make sure they are valid PDF documents.'
+      });
+    } finally {
+      setIsRptarPdfProcessing(false);
+      if (rptarPdfInputRef.current) rptarPdfInputRef.current.value = '';
     }
   };
 
@@ -4339,8 +4833,10 @@ export default function AdminPanel() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>PIN</TableHead>
+                      <TableHead>Record</TableHead>
                       <TableHead>Location</TableHead>
                       <TableHead>Registered Owner</TableHead>
+                      <TableHead>Status / Class</TableHead>
                       <TableHead>TD No.</TableHead>
                       <TableHead>Lot No.</TableHead>
                       <TableHead className="text-right">Area</TableHead>
@@ -4349,12 +4845,61 @@ export default function AdminPanel() {
                   </TableHeader>
                   <TableBody>
                     {selectedLogPins.map((pin, i) => {
-                      const prop = selectedLogProperties.find(p => p.pin === pin);
-                      return (
-                        <TableRow key={i}>
-                          <TableCell className="font-mono text-sm whitespace-nowrap">{pin}</TableCell>
+                      const matchingProps = selectedLogProperties.filter(p => p.pin === pin);
+
+                      if (matchingProps.length === 0) {
+                        return (
+                          <TableRow key={`${pin}-${i}-missing`}>
+                            <TableCell className="font-mono text-sm whitespace-nowrap">{pin}</TableCell>
+                            <TableCell className="text-xs text-gray-400">No matched record</TableCell>
+                            <TableCell className="max-w-[150px] truncate" title={getLocationFromPin(pin)}>{getLocationFromPin(pin)}</TableCell>
+                            <TableCell>N/A</TableCell>
+                            <TableCell>N/A</TableCell>
+                            <TableCell className="whitespace-nowrap">N/A</TableCell>
+                            <TableCell className="whitespace-nowrap">N/A</TableCell>
+                            <TableCell className="text-right whitespace-nowrap">N/A</TableCell>
+                            <TableCell className="text-right font-mono whitespace-nowrap">N/A</TableCell>
+                          </TableRow>
+                        );
+                      }
+
+                      return matchingProps.map((prop, matchIndex) => (
+                        <TableRow key={`${pin}-${i}-${prop.id}-${matchIndex}`}>
+                          <TableCell className="font-mono text-sm whitespace-nowrap">
+                            <div className="flex flex-col gap-1">
+                              <span>{pin}</span>
+                              {matchingProps.length > 1 && (
+                                <span className="inline-flex w-fit items-center rounded-full border border-amber-200 bg-amber-100 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-800">
+                                  Shared PIN
+                                </span>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs text-gray-600">
+                            {matchingProps.length > 1 ? `Record ${matchIndex + 1} of ${matchingProps.length}` : 'Single record'}
+                          </TableCell>
                           <TableCell className="max-w-[150px] truncate" title={prop?.address || getLocationFromPin(pin)}>{prop?.address || getLocationFromPin(pin)}</TableCell>
                           <TableCell className="max-w-[150px] truncate" title={prop?.registered_owner_name || 'N/A'}>{prop?.registered_owner_name || 'N/A'}</TableCell>
+                          <TableCell className="max-w-[220px]">
+                            <div className="flex flex-wrap gap-1">
+                              {prop?.status && (
+                                <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-blue-700">
+                                  {prop.status}
+                                </span>
+                              )}
+                              {prop?.classification && (
+                                <span className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-purple-700">
+                                  {prop.classification}
+                                </span>
+                              )}
+                              {prop?.taxability && (
+                                <span className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-indigo-700">
+                                  {prop.taxability}
+                                </span>
+                              )}
+                              {!prop?.status && !prop?.classification && !prop?.taxability && <span>N/A</span>}
+                            </div>
+                          </TableCell>
                           <TableCell className="whitespace-nowrap">{prop?.td_no || 'N/A'}</TableCell>
                           <TableCell className="whitespace-nowrap">{prop?.lot_no || 'N/A'}</TableCell>
                           <TableCell className="text-right whitespace-nowrap">{prop?.total_area || 'N/A'}</TableCell>
@@ -4362,7 +4907,7 @@ export default function AdminPanel() {
                             {prop?.assessed_value ? parseFloat(String(prop.assessed_value)).toLocaleString(undefined, { minimumFractionDigits: 2 }) : 'N/A'}
                           </TableCell>
                         </TableRow>
-                      );
+                      ));
                     })}
                   </TableBody>
                 </Table>

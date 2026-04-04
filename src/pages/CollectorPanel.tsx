@@ -3,6 +3,14 @@ import * as pdfjsLib from 'pdfjs-dist';
 import { useAuth } from '../components/ui/context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { formatPinSearch, autoFormatPinInput } from '@/src/lib/utils';
+import { extractSoaData, normalizeArea, normalizeLotNo, normalizeOwnerName, normalizePin, type SoaExtractionResult } from '@/src/lib/soaPdf';
+import {
+  getAvailableRules,
+  isRuleEffective,
+  calculateTaxForYear as computeTaxForYear,
+  calculateTaxForRange as computeTaxForRange,
+  type ComputationRule,
+} from '@/src/lib/rptComputation';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/src/components/ui/card';
 import { Button } from '@/src/components/ui/button';
 import { Input } from '@/src/components/ui/input';
@@ -59,6 +67,10 @@ interface Property {
   total_area: string;
   ownership_type?: string;
   claimed_area?: string;
+  old_pin?: string;
+  taxability?: string;
+  classification?: string;
+  remarks?: string;
 }
 
 interface Payment {
@@ -79,6 +91,12 @@ interface Payment {
   remarks?: string;
 }
 
+interface RptarUploadedSoaBatch {
+  fileName: string;
+  summary: SoaExtractionResult;
+  rows: any[];
+}
+
 interface User {
   id: number;
   full_name: string;
@@ -86,6 +104,24 @@ interface User {
   last_active_at?: string;
   queue_number?: number;
 }
+
+const buildPinMetaMap = (items: Property[]) => {
+  const counts = new Map<string, number>();
+  const seen = new Map<string, number>();
+  const meta = new Map<number, { count: number; index: number }>();
+
+  items.forEach(item => {
+    counts.set(item.pin, (counts.get(item.pin) || 0) + 1);
+  });
+
+  items.forEach(item => {
+    const index = (seen.get(item.pin) || 0) + 1;
+    seen.set(item.pin, index);
+    meta.set(item.id, { count: counts.get(item.pin) || 1, index });
+  });
+
+  return meta;
+};
 
 const getLocationFromPin = (pin: string) => {
   if (!pin) return 'Unknown Location';
@@ -167,164 +203,29 @@ const STANDARD_RANGES = [
   [2007, 2015], [2016, 2026]
 ];
 
-const calculateTaxForYear = (year: number, prop: Property, computationType: string, manualAssessedValue?: number) => {
-  const now = new Date();
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth(); // 0-11
+const calculateTaxForYear = (
+  year: number,
+  prop: Property,
+  computationType: string,
+  manualAssessedValue?: number,
+  options = {},
+  rules?: ComputationRule[]
+) => computeTaxForYear(year, prop, computationType, manualAssessedValue, options, rules);
 
-  // Base Tax Calculation
-  // Ensure assessedVal is a number. If prop.assessed_value is string, parse it.
-  let baseAssessedVal = typeof prop.assessed_value === 'string'
-    ? parseFloat((prop.assessed_value as string).replace(/,/g, ''))
-    : prop.assessed_value;
+const calculateTaxForRange = (
+  startYear: number,
+  endYear: number,
+  prop: Property,
+  computationType: string,
+  manualAssessedValue?: number,
+  options = {},
+  rules?: ComputationRule[]
+) => computeTaxForRange(startYear, endYear, prop, computationType, manualAssessedValue, options, rules);
 
-  if (isNaN(baseAssessedVal)) baseAssessedVal = 0;
-
-  let assessedVal = manualAssessedValue ?? baseAssessedVal;
-
-  // Adjust for Share Area if applicable
-  if (computationType === 'share') {
-    // Safely handle potential undefined or null values
-    const totalAreaStr = prop.total_area ? String(prop.total_area).replace(/[^0-9.]/g, '') : '1';
-    const claimedAreaStr = prop.claimed_area ? String(prop.claimed_area).replace(/[^0-9.]/g, '') : totalAreaStr;
-
-    const totalArea = parseFloat(totalAreaStr) || 1;
-    const claimedArea = parseFloat(claimedAreaStr) || totalArea;
-
-    assessedVal = assessedVal * (claimedArea / totalArea);
-  }
-
-  const basic = assessedVal * 0.01;
-  const sef = assessedVal * 0.01;
-  const taxDue = basic + sef;
-
-  let basicInterest = 0;
-  let sefInterest = 0;
-  let basicDiscount = 0;
-  let sefDiscount = 0;
-
-  if (year > currentYear) {
-    // Advance Payment
-    if (computationType === 'share') {
-      basicDiscount = Math.round((basic * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sef * 0.10) * 100) / 100;
-    } else {
-      basicDiscount = Math.round((basic * 0.20) * 100) / 100;
-      sefDiscount = Math.round((sef * 0.20) * 100) / 100;
-    }
-  } else if (year === currentYear) {
-    // Current Year Payment
-    const basicQuarter = basic / 4;
-    const sefQuarter = sef / 4;
-    const monthsElapsed = currentMonth + 1;
-
-    if (currentMonth < 3) {
-      basicDiscount = Math.round((basic * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sef * 0.10) * 100) / 100;
-    } else if (currentMonth < 6) {
-      basicInterest = Math.round((basicQuarter * 0.02 * monthsElapsed) * 100) / 100;
-      sefInterest = Math.round((sefQuarter * 0.02 * monthsElapsed) * 100) / 100;
-      basicDiscount = Math.round((basicQuarter * 3 * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sefQuarter * 3 * 0.10) * 100) / 100;
-    } else if (currentMonth < 9) {
-      basicInterest = Math.round((basicQuarter * 2 * 0.02 * monthsElapsed) * 100) / 100;
-      sefInterest = Math.round((sefQuarter * 2 * 0.02 * monthsElapsed) * 100) / 100;
-      basicDiscount = Math.round((basicQuarter * 2 * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sefQuarter * 2 * 0.10) * 100) / 100;
-    } else {
-      basicInterest = Math.round((basicQuarter * 3 * 0.02 * monthsElapsed) * 100) / 100;
-      sefInterest = Math.round((sefQuarter * 3 * 0.02 * monthsElapsed) * 100) / 100;
-      basicDiscount = Math.round((basicQuarter * 0.10) * 100) / 100;
-      sefDiscount = Math.round((sefQuarter * 0.10) * 100) / 100;
-    }
-  } else {
-    // Delinquent Payment
-    const rpvaraDeadline = new Date('2026-07-05');
-    const isRpvaraActive = now <= rpvaraDeadline;
-
-    if (computationType === 'rpvara' && isRpvaraActive) {
-      if (year < 2024) {
-        // Penalty fully waived for all delinquencies on or before June 30, 2024 — no interest
-      } else if (year === 2024) {
-        // Interest runs from July 1, 2024 up to the current month (accumulating).
-        // Since RPVARA waived Jan-June, only the second half (50%) is subject to interest.
-        const monthsDiff = (currentYear - 2024) * 12 + currentMonth - 5;
-        if (monthsDiff > 0) {
-          let interestRate = monthsDiff * 0.02;
-          interestRate = Math.min(interestRate, 0.72); // 72% cap
-          basicInterest = Math.round(((basic * 0.5) * interestRate) * 100) / 100;
-          sefInterest = Math.round(((sef * 0.5) * interestRate) * 100) / 100;
-        }
-      } else {
-        // 2025 onwards: standard 2% per month with the applicable cap
-        const monthsDiff = (currentYear - year) * 12 + currentMonth + 1;
-        let interestRate = monthsDiff * 0.02;
-        interestRate = year >= 1992 ? Math.min(interestRate, 0.72) : Math.min(interestRate, 0.24);
-        basicInterest = Math.round((basic * interestRate) * 100) / 100;
-        sefInterest = Math.round((sef * interestRate) * 100) / 100;
-      }
-    } else if (computationType === 'denr') {
-      // DENR: skip years older than 10 years ago
-      if (year < currentYear - 10) {
-        return {
-          basic_tax: 0,
-          sef_tax: 0,
-          interest: 0,
-          discount: 0,
-          amount: 0
-        };
-      } else {
-        // Delinquent years within the 10-year window: no interest, no discount
-        basicInterest = 0;
-        sefInterest = 0;
-        basicDiscount = 0;
-        sefDiscount = 0;
-      }
-    } else {
-      const monthsDiff = (currentYear - year) * 12 + currentMonth + 1;
-      let interestRate = monthsDiff * 0.02;
-      interestRate = year >= 1992 ? Math.min(interestRate, 0.72) : Math.min(interestRate, 0.24);
-      basicInterest = Math.round((basic * interestRate) * 100) / 100;
-      sefInterest = Math.round((sef * interestRate) * 100) / 100;
-    }
-  }
-
-  const finalInterest = basicInterest + sefInterest;
-  const finalDiscount = basicDiscount + sefDiscount;
-
-  return {
-    basic_tax: isNaN(basic) ? 0 : basic,
-    sef_tax: isNaN(sef) ? 0 : sef,
-    interest: isNaN(finalInterest) ? 0 : finalInterest,
-    discount: isNaN(finalDiscount) ? 0 : finalDiscount,
-    amount: (isNaN(taxDue) || isNaN(finalInterest) || isNaN(finalDiscount)) ? 0 : (taxDue + finalInterest - finalDiscount)
-  };
-};
-
-const calculateTaxForRange = (startYear: number, endYear: number, prop: Property, computationType: string, manualAssessedValue?: number) => {
-  let totalBasic = 0;
-  let totalSef = 0;
-  let totalInterest = 0;
-  let totalDiscount = 0;
-  let totalAmount = 0;
-
-  for (let y = startYear; y <= endYear; y++) {
-    const result = calculateTaxForYear(y, prop, computationType, manualAssessedValue);
-    totalBasic += result.basic_tax;
-    totalSef += result.sef_tax;
-    totalInterest += result.interest;
-    totalDiscount += result.discount;
-    totalAmount += result.amount;
-  }
-
-  return {
-    basic_tax: totalBasic.toFixed(2),
-    sef_tax: totalSef.toFixed(2),
-    interest: totalInterest.toFixed(2),
-    discount: totalDiscount.toFixed(2),
-    amount: totalAmount.toFixed(2)
-  };
-};
+const getCalculationOptions = (applyInterest: boolean, applyDiscount: boolean) => ({
+  includeInterest: applyInterest,
+  includeDiscount: applyDiscount
+});
 
 import { ActiveUsersList } from '@/src/components/ActiveUsersList';
 import { MessagePopup } from '@/src/components/MessagePopup';
@@ -345,6 +246,7 @@ export default function CollectorPanel() {
   // Payment Queue State
   const [paymentQueue, setPaymentQueue] = useState<any[]>([]);
   const [pendingAssessments, setPendingAssessments] = useState<any[]>([]);
+  const [computationRules, setComputationRules] = useState<ComputationRule[]>([]);
 
   // Form State
   const [paymentForm, setPaymentForm] = useState({
@@ -356,7 +258,9 @@ export default function CollectorPanel() {
     interest: '',
     discount: '',
     amount: '',
-    computationType: 'standard' // standard, rpvara, denr, share
+    computationType: 'standard', // kept for compatibility with existing records
+    applyInterest: false,
+    applyDiscount: false
   });
 
   const [passwordForm, setPasswordForm] = useState({
@@ -411,11 +315,27 @@ export default function CollectorPanel() {
   const [rptarPayments, setRptarPayments] = useState<Payment[]>([]);
   const [collectorPayments, setCollectorPayments] = useState<any[]>([]);
   const [isRptarSearching, setIsRptarSearching] = useState(false);
+  const [isRptarPdfProcessing, setIsRptarPdfProcessing] = useState(false);
+  const rptarPdfInputRef = useRef<HTMLInputElement>(null);
+  const [rptarUploadedSoasByProperty, setRptarUploadedSoasByProperty] = useState<Record<number, RptarUploadedSoaBatch[]>>({});
+  const [rptarUploadStatus, setRptarUploadStatus] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isPdfProcessing, setIsPdfProcessing] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
+  const [uploadedSoaSummary, setUploadedSoaSummary] = useState<SoaExtractionResult | null>(null);
   const [isAbstractLoading, setIsAbstractLoading] = useState(false);
   const [abstractSearchQuery, setAbstractSearchQuery] = useState('');
   const [activeAbstractSearchQuery, setActiveAbstractSearchQuery] = useState('');
+
+  const availableComputationRules = useMemo(
+    () => getAvailableRules(computationRules),
+    [computationRules]
+  );
+
+  useEffect(() => {
+    if (!availableComputationRules.some(rule => rule.value === paymentForm.computationType)) {
+      setPaymentForm(prev => ({ ...prev, computationType: 'standard' }));
+    }
+  }, [availableComputationRules, paymentForm.computationType]);
 
   const abstractSummary = useMemo(() => {
     const filtered = collectorPayments.filter(p =>
@@ -443,6 +363,12 @@ export default function CollectorPanel() {
 
   const [erptaasPin, setErptaasPin] = useState('');
   const [erptaasUrl, setErptaasUrl] = useState('');
+
+  const rptarPinMeta = useMemo(() => buildPinMetaMap(rptarSearchResults), [rptarSearchResults]);
+  const selectedRptarUploadedSoas = useMemo(
+    () => (rptarSelectedPropertyId ? (rptarUploadedSoasByProperty[rptarSelectedPropertyId] || []) : []),
+    [rptarSelectedPropertyId, rptarUploadedSoasByProperty]
+  );
 
   const syncGlobalSearch = (val: string, submit: boolean = false) => {
     const formatted = autoFormatPinInput(val);
@@ -486,6 +412,15 @@ export default function CollectorPanel() {
       console.error('Failed to fetch collector payments:', err);
     } finally {
       setIsAbstractLoading(false);
+    }
+  };
+
+  const fetchComputationRules = async () => {
+    try {
+      const res = await fetch('/api/admin/computation-types');
+      if (res.ok) setComputationRules(await res.json());
+    } catch (err) {
+      console.error('Failed to fetch computation rules:', err);
     }
   };
 
@@ -634,12 +569,18 @@ export default function CollectorPanel() {
     }
   }, [rptarSelectedPropertyId]);
 
+  useEffect(() => {
+    setRptarUploadStatus(null);
+  }, [rptarSelectedPropertyId]);
+
   const handleRptarSearch = async (e: React.FormEvent | null, overrideQuery?: string) => {
     e?.preventDefault();
     const queryToUse = overrideQuery || rptarSearchQuery;
     if (!queryToUse.trim()) return;
     setIsRptarSearching(true);
     setRptarSelectedPropertyId(null);
+    setRptarUploadedSoasByProperty({});
+    setRptarUploadStatus(null);
     try {
       const formattedQuery = formatPinSearch(queryToUse);
       const res = await fetch(`/api/properties?search=${encodeURIComponent(formattedQuery)}&includeTaxpayer=true`);
@@ -659,13 +600,34 @@ export default function CollectorPanel() {
     }
   };
 
+  const getSoaMatchIssues = (soa: SoaExtractionResult, prop: Property) => {
+    const issues: string[] = [];
+
+    if (!soa.ownerName || normalizeOwnerName(soa.ownerName) !== normalizeOwnerName(prop.registered_owner_name)) {
+      issues.push(`Registered Owner mismatch (SOA: ${soa.ownerName || 'Not found'} | App: ${prop.registered_owner_name || 'Not found'})`);
+    }
+
+    if (!soa.pin || normalizePin(soa.pin) !== normalizePin(prop.pin)) {
+      issues.push(`PIN mismatch (SOA: ${soa.pin || 'Not found'} | App: ${prop.pin || 'Not found'})`);
+    }
+
+    if (!soa.lotNo || normalizeLotNo(soa.lotNo) !== normalizeLotNo(prop.lot_no)) {
+      issues.push(`Lot# mismatch (SOA: ${soa.lotNo || 'Not found'} | App: ${prop.lot_no || 'Not found'})`);
+    }
+
+    if (!soa.area || normalizeArea(soa.area) !== normalizeArea(prop.total_area)) {
+      issues.push(`Area mismatch (SOA: ${soa.area || 'Not found'} | App: ${prop.total_area || 'Not found'})`);
+    }
+
+    return issues;
+  };
+
   const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !selectedPropertyId) return;
 
     setIsPdfProcessing(true);
     try {
-      // Set worker to local file
       pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
       const arrayBuffer = await file.arrayBuffer();
@@ -695,149 +657,61 @@ export default function CollectorPanel() {
         return;
       }
 
-      // Extract and verify PIN from PDF
-      const pinRegex = /028[-.]09[-.](\d{4})[-.](\d{3})[-.](?:\()?(\d{2})(?:\))?(?:[-.](\d{4}))?/g;
-      let extractedPin: string | null = null;
-      let pinMatch;
+      const extractedSoa = extractSoaData(fullText);
+      setUploadedSoaSummary(extractedSoa);
 
-      while ((pinMatch = pinRegex.exec(fullText)) !== null) {
-        const part2 = pinMatch[1];
-        const part3 = pinMatch[2];
-        const part4 = pinMatch[3];
-        const part5 = pinMatch[4];
-        const matchedText = pinMatch[0];
-        const separator = matchedText.includes('.') ? '.' : '-';
-
-        if (part5) {
-          extractedPin = `028${separator}09${separator}${part2}${separator}${part3}${separator}${part4}${separator}${part5}`;
-        } else {
-          extractedPin = `028${separator}09${separator}${part2}${separator}${part3}${separator}${part4}`;
-        }
-        break;
+      const matchIssues = getSoaMatchIssues(extractedSoa, prop);
+      if (matchIssues.length > 0) {
+        alert(`SOA does not match the selected property.\n\n${matchIssues.join('\n')}`);
+        return;
       }
 
-      if (extractedPin) {
-        const normalizedExtracted = extractedPin.replace(/\./g, '-').toUpperCase();
-        const normalizedProperty = prop.pin.replace(/\./g, '-').toUpperCase();
-        if (normalizedExtracted !== normalizedProperty) {
-          alert(`PIN Mismatch!\nPDF PIN: ${extractedPin}\nProperty PIN: ${prop.pin}\n\nPlease ensure you uploading the correct document for this property.`);
-          return;
-        }
-      } else {
-        alert("Warning: Could not find PIN in PDF. Proceeding with extraction.\nPlease manually verify this is the correct property document.");
-      }      // Block-Based Parsing: Split text by TD# occurrences to isolated row contexts
-      // This prevents capturing totals or intermediate values from other columns
-      const rowBlocks = fullText.split(/(?=\b[\d\-]{3,16}[A-Z]?\b|\bTOTAL\b)/i);
-      const yearEntries: Array<{ year: number; assessed_value: number; td_no?: string }> = [];
-      const normalizedPropPin = prop.pin.replace(/\./g, '-').toUpperCase();
-
-      let mMatch;
-      while ((mMatch = moneyRegex.exec(fullText)) !== null) {
-        const valStr = mMatch[1];
-        const value = parseFloat(valStr.replace(/,/g, ''));
-        
-        if (value < 500) continue; 
-
-        // Scan context window around the monetary anchor
-        const start = Math.max(0, mMatch.index - 120);
-        const end = Math.min(fullText.length, mMatch.index + 120);
-        const window = fullText.substring(start, end);
-
-        // 1. Find Years (1[9]... or 2[0]...)
-        const yearsFound = window.match(/\b(1[9]\d{2}|2[0]\d{2})\b/g) || [];
-        if (yearsFound.length === 0) continue;
-
-        // 2. Find TD# (Exclude PIN)
-        const tdMatches = window.match(/\b(\d{2,4}-\d{3,}[\d\-A-Z]*)\b/g) || [];
-        const tdStr = tdMatches.find(t => t.toUpperCase() !== normalizedPropPin) || (tdMatches.length > 0 ? tdMatches[0] : '');
-        if (!tdStr) continue;
-
-        // 3. Handle Year or Range
-        const hasDash = /[\-–]/.test(window);
-        const yParts = Array.from(new Set(yearsFound)).map(y => parseInt(y)).sort((a, b) => a - b);
-        
-        const addEntry = (y: number) => {
-          const key = `${y}-${tdStr.toUpperCase()}-${value.toFixed(2)}`;
-          if (!uniqueEntryKeys.has(key)) {
-            uniqueEntryKeys.add(key);
-            yearEntries.push({ year: y, assessed_value: value, td_no: tdStr });
-          }
-        };
-
-        if (yParts.length >= 2 && hasDash) {
-          const startY = yParts[0];
-          const endY = yParts[yParts.length - 1];
-          for (let y = startY; y <= endY; y++) {
-            addEntry(y);
-          }
-        } else {
-          yParts.forEach(y => addEntry(y));
-        }
-      }
-
-      if (yearEntries.length === 0) {
+      if (extractedSoa.groupedRanges.length === 0) {
         alert("No valid entries found in the PDF.\n\nTroubleshooting:\n• Expected format: TD# followed by Assessed Value and Year.\n• Example: 001-0017-A 12,460.00 2003");
         return;
       }
 
-      yearEntries.sort((a, b) => a.year - b.year);
-
-      const groupedRanges: Array<{ startYear: number; endYear: number; assessed_value: number; td_no?: string }> = [];
-      let currentStart = yearEntries[0].year;
-      let currentAV = yearEntries[0].assessed_value;
-      let currentTD = yearEntries[0].td_no;
-
-      for (let i = 1; i <= yearEntries.length; i++) {
-        const nextEntry = yearEntries[i];
-        if (i === yearEntries.length || nextEntry.assessed_value !== currentAV || nextEntry.td_no !== currentTD || nextEntry.year !== yearEntries[i - 1].year + 1) {
-          const endYear = yearEntries[i - 1].year;
-          groupedRanges.push({
-            startYear: currentStart,
-            endYear: endYear,
-            assessed_value: currentAV,
-            td_no: currentTD
-          });
-          if (i < yearEntries.length) {
-            currentStart = nextEntry.year;
-            currentAV = nextEntry.assessed_value;
-            currentTD = nextEntry.td_no;
-          }
-        }
-      }
-
-      const generatedItems: any[] = [];
-      for (const range of groupedRanges) {
-        const result = calculateTaxForRange(range.startYear, range.endYear, prop, paymentForm.computationType, range.assessed_value);
-        generatedItems.push({
+      const generatedItems = extractedSoa.groupedRanges.map(range => {
+        const result = calculateTaxForRange(
+          range.startYear,
+          range.endYear,
+          prop,
+          paymentForm.computationType,
+          range.assessedValue,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          computationRules
+        );
+        return {
           property_id: parseInt(selectedPropertyId),
           pin: prop.pin,
-          td_no: range.td_no,
+          td_no: prop.td_no,
           year: range.startYear === range.endYear ? range.startYear.toString() : `${range.startYear}-${range.endYear}`,
           yearCount: range.endYear - range.startYear + 1,
-          assessed_value: range.assessed_value,
+          assessed_value: range.assessedValue,
           ...result,
           or_no: paymentForm.or_no,
           computationType: paymentForm.computationType,
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
           amount: Number(result.amount)
-        });
-      }
+        };
+      });
 
       if (generatedItems.length > 0) {
-        // Derive the overall year range covered by the extracted data
         let overallMin = Infinity;
         let overallMax = -Infinity;
-        for (const gi of generatedItems) {
-          const parts = String(gi.year).split('-');
-          const s = parseInt(parts[0]);
-          const eEnd = parts.length > 1 ? parseInt(parts[1]) : s;
-          if (s < overallMin) overallMin = s;
-          if (eEnd > overallMax) overallMax = eEnd;
+        for (const item of generatedItems) {
+          const parts = String(item.year).split('-');
+          const startYear = parseInt(parts[0], 10);
+          const endYear = parts.length > 1 ? parseInt(parts[1], 10) : startYear;
+          if (startYear < overallMin) overallMin = startYear;
+          if (endYear > overallMax) overallMax = endYear;
         }
+
         const rangeLabel = overallMin === overallMax ? `${overallMin}` : `${overallMin}-${overallMax}`;
         setPaymentForm(prev => ({ ...prev, year: rangeLabel }));
         setPreviewItems(generatedItems);
 
-        // Save extracted data to assessments table so it persists for later payment
         if (selectedTaxpayerId) {
           try {
             const assessmentsToSave = generatedItems.map(item => ({
@@ -859,11 +733,18 @@ export default function CollectorPanel() {
             });
           } catch (err) {
             console.error('Failed to save assessments:', err);
-            // Don't alert user as this is a background operation
           }
         }
 
-        alert(`Successfully extracted and added ${generatedItems.length} ranges from SOA.`);
+        const ownerWarning =
+          extractedSoa.ownerName &&
+          normalizeOwnerName(extractedSoa.ownerName) !== normalizeOwnerName(prop.registered_owner_name)
+            ? `\n\nWarning: SOA Name is "${extractedSoa.ownerName}" while property owner is "${prop.registered_owner_name}". Please verify before payment.`
+            : '';
+
+        alert(
+          `Successfully extracted SOA data.\n\nRegistered Owner: ${extractedSoa.ownerName || 'Not found'}\nPIN: ${extractedSoa.pin || 'Not found'}\nLot#: ${extractedSoa.lotNo || 'Not found'}\nArea: ${extractedSoa.area || 'Not found'}\nYears: ${rangeLabel}\nEntries: ${generatedItems.length}${ownerWarning}`
+        );
       } else {
         alert("No valid data ranges found in the SOA. Please ensure the document contains clear year and assessed value columns.");
       }
@@ -876,6 +757,131 @@ export default function CollectorPanel() {
     }
   };
 
+  const handleRptarPdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []) as File[];
+    if (files.length === 0) return;
+
+    if (rptarSearchResults.length === 0) {
+      setRptarUploadStatus({ type: 'error', text: 'Search properties first before uploading SOAs for RPTAR.' });
+      if (rptarPdfInputRef.current) rptarPdfInputRef.current.value = '';
+      return;
+    }
+
+    setIsRptarPdfProcessing(true);
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+      const uploadsByProperty: Record<number, RptarUploadedSoaBatch[]> = {};
+      const matchedMessages: string[] = [];
+      const failedMessages: string[] = [];
+      let nextSelectedPropertyId = rptarSelectedPropertyId;
+
+      for (const file of files) {
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        let fullText = '';
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          fullText += textContent.items.map((item: any) => (item as any).str || '').join(' ') + '\n';
+        }
+
+        if (!fullText.trim()) {
+          failedMessages.push(`${file.name}: PDF contains no readable text.`);
+          continue;
+        }
+
+        const extractedSoa = extractSoaData(fullText);
+        if (extractedSoa.tdGroupedRanges.length === 0) {
+          failedMessages.push(`${file.name}: no TD#, Year, and Assessed Value rows were found.`);
+          continue;
+        }
+
+        const matchedProperties = rptarSearchResults.filter(prop => getSoaMatchIssues(extractedSoa, prop).length === 0);
+        if (matchedProperties.length === 0) {
+          failedMessages.push(`${file.name}: no searched property matched the SOA fields.`);
+          continue;
+        }
+
+        if (matchedProperties.length > 1) {
+          failedMessages.push(`${file.name}: matched multiple properties. Narrow the search or open the exact record first.`);
+          continue;
+        }
+
+        const matchedProperty = matchedProperties[0];
+        const soaRows = extractedSoa.tdGroupedRanges.map((range, index) => ({
+          id: `rptar-soa-${matchedProperty.id}-${Date.now()}-${index}`,
+          td_no: range.tdNo,
+          year: range.startYear === range.endYear ? `${range.startYear}` : `${range.startYear}-${range.endYear}`,
+          assessed_value: range.assessedValue,
+          basic_tax: 0,
+          sef_tax: 0,
+          interest: 0,
+          discount: 0,
+          record_type: 'assessment',
+          remarks: `SOA: ${file.name}`
+        }));
+
+        if (!uploadsByProperty[matchedProperty.id]) {
+          uploadsByProperty[matchedProperty.id] = [];
+        }
+
+        uploadsByProperty[matchedProperty.id].push({
+          fileName: file.name,
+          summary: extractedSoa,
+          rows: soaRows
+        });
+
+        if (!nextSelectedPropertyId) {
+          nextSelectedPropertyId = matchedProperty.id;
+        }
+
+        matchedMessages.push(`${file.name} -> ${matchedProperty.registered_owner_name} (${matchedProperty.pin})`);
+      }
+
+      if (Object.keys(uploadsByProperty).length > 0) {
+        setRptarUploadedSoasByProperty(prev => {
+          const merged = { ...prev };
+          for (const [propertyIdText, batches] of Object.entries(uploadsByProperty)) {
+            const propertyId = Number(propertyIdText);
+            merged[propertyId] = [...(merged[propertyId] || []), ...batches];
+          }
+          return merged;
+        });
+      }
+
+      if (nextSelectedPropertyId) {
+        setRptarSelectedPropertyId(nextSelectedPropertyId);
+      }
+
+      if (matchedMessages.length > 0 && failedMessages.length === 0) {
+        setRptarUploadStatus({
+          type: 'success',
+          text: `${matchedMessages.length} SOA file${matchedMessages.length === 1 ? '' : 's'} matched and added to account history.`
+        });
+      } else if (matchedMessages.length > 0) {
+        setRptarUploadStatus({
+          type: 'success',
+          text: `${matchedMessages.length} SOA file${matchedMessages.length === 1 ? '' : 's'} added. ${failedMessages.length} file${failedMessages.length === 1 ? '' : 's'} need review.`
+        });
+      } else {
+        setRptarUploadStatus({
+          type: 'error',
+          text: failedMessages[0] || 'No SOA files could be matched to the current search results.'
+        });
+      }
+    } catch (err) {
+      console.error('RPTAR PDF processing error:', err);
+      setRptarUploadStatus({
+        type: 'error',
+        text: 'Failed to process one or more SOA files for RPTAR. Please make sure they are valid PDF documents.'
+      });
+    } finally {
+      setIsRptarPdfProcessing(false);
+      if (rptarPdfInputRef.current) rptarPdfInputRef.current.value = '';
+    }
+  };
   const fetchTaxpayerLogs = async () => {
     try {
       const res = await fetch('/api/taxpayer-logs');
@@ -893,6 +899,7 @@ export default function CollectorPanel() {
 
   useEffect(() => {
     fetchUsers();
+    fetchComputationRules();
     fetchProperties();
     fetchAssessments();
     fetchTaxpayerLogs();
@@ -912,6 +919,7 @@ export default function CollectorPanel() {
     setSelectedPropertyId('');
     setPaymentQueue([]); // Clear queue on taxpayer change
     setPreviewItems([]); // Clear preview
+    setUploadedSoaSummary(null);
     resetForm();
   }, [selectedTaxpayerId]);
 
@@ -935,6 +943,7 @@ export default function CollectorPanel() {
           amount: '',
           computationType: 'standard'
         }));
+        setUploadedSoaSummary(null);
         // Auto-generate preview for default year
         generatePreview(defaultYear, 'standard', prop);
       }
@@ -949,6 +958,83 @@ export default function CollectorPanel() {
     generatePreview(paymentForm.year, paymentForm.computationType, prop);
   }, [paymentForm.year, paymentForm.computationType, selectedPropertyId]);
 
+  useEffect(() => {
+    if (!selectedPropertyId) return;
+    const prop = properties.find(p => p.id.toString() === selectedPropertyId);
+    if (!prop) return;
+
+    setPreviewItems(prevItems => {
+      if (prevItems.length === 0) return prevItems;
+
+      return prevItems.map(item => {
+        const yearParts = String(item.year).split('-');
+        const startYear = parseInt(yearParts[0].trim(), 10);
+        const endYear = yearParts.length > 1 ? parseInt(yearParts[1].trim(), 10) : startYear;
+        const manualAV = parseFloat(String(item.assessed_value).replace(/,/g, ''));
+        const result = calculateTaxForRange(
+          startYear,
+          endYear,
+          prop,
+          item.computationType || paymentForm.computationType,
+          isNaN(manualAV) ? 0 : manualAV,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount)
+        );
+
+        return {
+          ...item,
+          basic_tax: result.basic_tax,
+          sef_tax: result.sef_tax,
+          interest: result.interest,
+          discount: result.discount,
+          amount: Number(result.amount),
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount
+        };
+      });
+    });
+  }, [paymentForm.applyInterest, paymentForm.applyDiscount, paymentForm.computationType, properties, selectedPropertyId]);
+
+  useEffect(() => {
+    setPaymentQueue(prevQueue => {
+      if (prevQueue.length === 0) return prevQueue;
+
+      const needsUpdate = prevQueue.some(item =>
+        item.applyInterest !== paymentForm.applyInterest ||
+        item.applyDiscount !== paymentForm.applyDiscount
+      );
+      if (!needsUpdate) return prevQueue;
+
+      return prevQueue.map(item => {
+        const prop = properties.find(p => p.id === item.property_id);
+        if (!prop) return item;
+
+        const yearParts = String(item.year).split('-');
+        const startYear = parseInt(yearParts[0].trim(), 10);
+        const endYear = yearParts.length > 1 ? parseInt(yearParts[1].trim(), 10) : startYear;
+        const manualAV = parseFloat(String(item.assessed_value).replace(/,/g, ''));
+        const result = calculateTaxForRange(
+          startYear,
+          endYear,
+          prop,
+          item.computationType || paymentForm.computationType,
+          isNaN(manualAV) ? 0 : manualAV,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount)
+        );
+
+        return {
+          ...item,
+          basic_tax: result.basic_tax,
+          sef_tax: result.sef_tax,
+          interest: result.interest,
+          discount: result.discount,
+          amount: Number(result.amount),
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount
+        };
+      });
+    });
+  }, [paymentForm.applyInterest, paymentForm.applyDiscount, paymentForm.computationType, properties]);
+
   const generatePreview = (yearInput: string, type: string, prop: Property) => {
     const currentYear = new Date().getFullYear();
 
@@ -961,13 +1047,23 @@ export default function CollectorPanel() {
       // Update the year input to show the forced DENR range
       setPaymentForm(prev => ({ ...prev, year: denrLabel }));
 
-      const result = calculateTaxForRange(denrStart, denrEnd, prop, 'denr', prop.assessed_value);
+      const result = calculateTaxForRange(
+        denrStart,
+        denrEnd,
+        prop,
+        'denr',
+        prop.assessed_value,
+        getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+        computationRules
+      );
       setPreviewItems([{
         year: denrLabel,
         yearCount: denrEnd - denrStart + 1,
         assessed_value: prop.assessed_value,
         ...result,
         amount: Number(result.amount),
+        applyInterest: paymentForm.applyInterest,
+        applyDiscount: paymentForm.applyDiscount,
         isManual: true
       }]);
       return;
@@ -999,13 +1095,23 @@ export default function CollectorPanel() {
 
         // If manual range, show 1 row.
         const avToUse = start < 2016 ? 0 : prop.assessed_value;
-        const result = calculateTaxForRange(start, end, prop, type, avToUse);
+        const result = calculateTaxForRange(
+          start,
+          end,
+          prop,
+          type,
+          avToUse,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          computationRules
+        );
         items.push({
           year: yearInput,
           yearCount: end - start + 1,
           assessed_value: avToUse,
           ...result,
           amount: Number(result.amount),
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
           isManual: true
         });
       }
@@ -1013,13 +1119,23 @@ export default function CollectorPanel() {
       const year = parseInt(yearInput);
       if (!isNaN(year)) {
         const avToUse = year < 2016 ? 0 : prop.assessed_value;
-        const result = calculateTaxForRange(year, year, prop, type, avToUse);
+        const result = calculateTaxForRange(
+          year,
+          year,
+          prop,
+          type,
+          avToUse,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          computationRules
+        );
         items.push({
           year: yearInput,
           yearCount: 1,
           assessed_value: avToUse,
           ...result,
           amount: Number(result.amount),
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
           isManual: true
         });
       }
@@ -1039,7 +1155,15 @@ export default function CollectorPanel() {
       const denrStart = currentYear - 10;
       const denrEnd = currentYear;
       const denrLabel = `${denrStart}-${denrEnd}`;
-      const result = calculateTaxForRange(denrStart, denrEnd, prop, 'denr', prop.assessed_value);
+      const result = calculateTaxForRange(
+        denrStart,
+        denrEnd,
+        prop,
+        'denr',
+        prop.assessed_value,
+        getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+        computationRules
+      );
       setPreviewItems([{
         property_id: parseInt(selectedPropertyId),
         pin: prop.pin,
@@ -1049,6 +1173,8 @@ export default function CollectorPanel() {
         ...result,
         or_no: paymentForm.or_no,
         computationType: 'denr',
+        applyInterest: paymentForm.applyInterest,
+        applyDiscount: paymentForm.applyDiscount,
         amount: Number(result.amount)
       }]);
       setPaymentForm(prev => ({ ...prev, year: denrLabel }));
@@ -1067,7 +1193,15 @@ export default function CollectorPanel() {
       if (range) {
         const endYear = range[1];
         const avToUse = currentStart < 2016 ? 0 : prop.assessed_value;
-        const result = calculateTaxForRange(currentStart, endYear, prop, paymentForm.computationType, avToUse);
+        const result = calculateTaxForRange(
+          currentStart,
+          endYear,
+          prop,
+          paymentForm.computationType,
+          avToUse,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          computationRules
+        );
         generatedItems.push({
           property_id: parseInt(selectedPropertyId),
           pin: prop.pin,
@@ -1077,12 +1211,22 @@ export default function CollectorPanel() {
           ...result,
           or_no: paymentForm.or_no,
           computationType: paymentForm.computationType,
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
           amount: Number(result.amount)
         });
         currentStart = endYear + 1;
       } else {
         const avToUse = currentStart < 2016 ? 0 : prop.assessed_value;
-        const result = calculateTaxForRange(currentStart, currentStart, prop, paymentForm.computationType, avToUse);
+        const result = calculateTaxForRange(
+          currentStart,
+          currentStart,
+          prop,
+          paymentForm.computationType,
+          avToUse,
+          getCalculationOptions(paymentForm.applyInterest, paymentForm.applyDiscount),
+          computationRules
+        );
         generatedItems.push({
           property_id: parseInt(selectedPropertyId),
           pin: prop.pin,
@@ -1092,6 +1236,8 @@ export default function CollectorPanel() {
           ...result,
           or_no: paymentForm.or_no,
           computationType: paymentForm.computationType,
+          applyInterest: paymentForm.applyInterest,
+          applyDiscount: paymentForm.applyDiscount,
           amount: Number(result.amount)
         });
         currentStart++;
@@ -1122,13 +1268,26 @@ export default function CollectorPanel() {
 
         const manualAV = parseFloat(value);
         // If manualAV is NaN (empty), pass 0 or undefined.
-        const result = calculateTaxForRange(startYear, endYear, prop, paymentForm.computationType, isNaN(manualAV) ? 0 : manualAV);
+        const result = calculateTaxForRange(
+          startYear,
+          endYear,
+          prop,
+          paymentForm.computationType,
+          isNaN(manualAV) ? 0 : manualAV,
+          getCalculationOptions(
+            item.applyInterest ?? paymentForm.applyInterest,
+            item.applyDiscount ?? paymentForm.applyDiscount
+          ),
+          computationRules
+        );
 
         item.basic_tax = result.basic_tax;
         item.sef_tax = result.sef_tax;
         item.interest = result.interest;
         item.discount = result.discount;
         item.amount = Number(result.amount);
+        item.applyInterest = item.applyInterest ?? paymentForm.applyInterest;
+        item.applyDiscount = item.applyDiscount ?? paymentForm.applyDiscount;
       }
     }
     setPreviewItems(newPreview);
@@ -1189,7 +1348,9 @@ export default function CollectorPanel() {
       interest: '',
       discount: '',
       amount: '',
-      computationType: 'standard'
+      computationType: 'standard',
+      applyInterest: paymentForm.applyInterest,
+      applyDiscount: paymentForm.applyDiscount
     });
     setPreviewItems([]);
   };
@@ -1207,6 +1368,8 @@ export default function CollectorPanel() {
       ...item,
       or_no: paymentForm.or_no,
       computationType: paymentForm.computationType,
+      applyInterest: item.applyInterest ?? paymentForm.applyInterest,
+      applyDiscount: item.applyDiscount ?? paymentForm.applyDiscount,
       remarks: paymentForm.computationType === 'share' ? 'Share Area' : ''
     }));
 
@@ -1229,6 +1392,8 @@ export default function CollectorPanel() {
       discount: assessment.discount,
       amount: assessment.amount,
       computationType: 'standard',
+      applyInterest: parseFloat(String(assessment.interest || 0)) > 0,
+      applyDiscount: parseFloat(String(assessment.discount || 0)) > 0,
       or_no: '',
       assessment_id: assessment.id,
       remarks: ''
@@ -1380,7 +1545,9 @@ export default function CollectorPanel() {
       interest: assessment.interest,
       discount: assessment.discount,
       amount: assessment.amount,
-      computationType: 'standard' // Default or infer from assessment if stored
+      computationType: 'standard', // Default or infer from assessment if stored
+      applyInterest: parseFloat(String(assessment.interest || 0)) > 0,
+      applyDiscount: parseFloat(String(assessment.discount || 0)) > 0
     });
 
     // Set selected property
@@ -1399,6 +1566,8 @@ export default function CollectorPanel() {
       discount: assessment.discount,
       amount: assessment.amount,
       computationType: 'standard',
+      applyInterest: parseFloat(String(assessment.interest || 0)) > 0,
+      applyDiscount: parseFloat(String(assessment.discount || 0)) > 0,
       or_no: '',
       assessment_id: assessment.id,
       isManual: true // Treat as manual to avoid auto-recalc overriding
@@ -1450,7 +1619,8 @@ export default function CollectorPanel() {
       }
 
       const manualAV = parseFloat(newValue.replace(/,/g, ''));
-      const result = calculateTaxForRange(startYear, endYear, prop, 'standard', isNaN(manualAV) ? 0 : manualAV);
+      const result = calculateTaxForRange(startYear, endYear, prop, 'standard', isNaN(manualAV) ? 0 : manualAV, {}, computationRules);
+      
 
       return {
         ...a,
@@ -2070,25 +2240,32 @@ export default function CollectorPanel() {
           <CardContent>
             <div className="space-y-6">
               {/* Inputs */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4">
                 <div className="space-y-2">
-                  <Label>Computation Type</Label>
-                  <Select
-                    value={paymentForm.computationType}
-                    onValueChange={v => setPaymentForm({ ...paymentForm, computationType: v })}
-                  >
-                    <SelectTrigger className="w-full h-12 rounded-none border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                      <SelectValue placeholder="Select Type..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="standard">Standard</SelectItem>
-                      <SelectItem value="rpvara" disabled={new Date() > new Date('2026-07-05')}>
-                        RPVARA {new Date() > new Date('2026-07-05') ? '(EXPIRED)' : ''}
-                      </SelectItem>
-                      <SelectItem value="denr">DENR</SelectItem>
-                      <SelectItem value="share">Share Area</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Label>Rule</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {availableComputationRules.map(rule => {
+                      const isDisabled = !isRuleEffective(rule);
+                      const isActive = paymentForm.computationType === rule.value;
+
+                      return (
+                        <Button
+                          key={rule.value}
+                          type="button"
+                          variant={isActive ? 'default' : 'outline'}
+                          disabled={isDisabled}
+                          onClick={() => setPaymentForm(prev => ({ ...prev, computationType: rule.value }))}
+                          className="h-9 rounded-full px-4 text-xs font-semibold"
+                        >
+                          {rule.label}
+                          {isDisabled ? ' (Inactive)' : ''}
+                        </Button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Current-year and advance-payment discounts still follow the selected rule and the app&apos;s existing year logic.
+                  </p>
                 </div>
 
                 <div className="space-y-2">
@@ -2134,6 +2311,20 @@ export default function CollectorPanel() {
                 </div>
               </div>
 
+              {uploadedSoaSummary && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 space-y-2 text-sm">
+                  <h4 className="font-semibold text-emerald-900">Extracted From SOA</h4>
+                  <div className="grid grid-cols-1 gap-1 text-emerald-950">
+                    <div><span className="font-medium">Name:</span> {uploadedSoaSummary.ownerName || 'Not found'}</div>
+                    <div><span className="font-medium">PIN:</span> {uploadedSoaSummary.pin || 'Not found'}</div>
+                    <div><span className="font-medium">Lot#:</span> {uploadedSoaSummary.lotNo || 'Not found'}</div>
+                    <div><span className="font-medium">Area:</span> {uploadedSoaSummary.area || 'Not found'}</div>
+                    <div><span className="font-medium">Year:</span> {uploadedSoaSummary.groupedRanges.map(range => range.startYear === range.endYear ? `${range.startYear}` : `${range.startYear}-${range.endYear}`).join(', ') || 'Not found'}</div>
+                    <div><span className="font-medium">Assessed Value:</span> {uploadedSoaSummary.groupedRanges.map(range => range.assessedValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })).join(' | ') || 'Not found'}</div>
+                  </div>
+                </div>
+              )}
+
               {/* Preview Table */}
               <div className="border border-gray-200 rounded-xl overflow-hidden shadow-sm">
                 <table className="w-full text-sm text-left">
@@ -2144,8 +2335,28 @@ export default function CollectorPanel() {
                       <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Assessed<br />Value</th>
                       <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Basic<br />Tax</th>
                       <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">SEF<br />Tax</th>
-                      <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Interest</th>
-                      <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Discount</th>
+                      <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">
+                        <label className="inline-flex items-center justify-end gap-2 w-full cursor-pointer">
+                          <span>Interest</span>
+                          <input
+                            type="checkbox"
+                            checked={paymentForm.applyInterest}
+                            onChange={e => setPaymentForm(prev => ({ ...prev, applyInterest: e.target.checked }))}
+                            className="h-4 w-4"
+                          />
+                        </label>
+                      </th>
+                      <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">
+                        <label className="inline-flex items-center justify-end gap-2 w-full cursor-pointer">
+                          <span>Discount</span>
+                          <input
+                            type="checkbox"
+                            checked={paymentForm.applyDiscount}
+                            onChange={e => setPaymentForm(prev => ({ ...prev, applyDiscount: e.target.checked }))}
+                            className="h-4 w-4"
+                          />
+                        </label>
+                      </th>
                       <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right align-bottom">Total</th>
                       <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center align-bottom">Action</th>
                     </tr>
@@ -2462,21 +2673,67 @@ export default function CollectorPanel() {
   const renderRPTAR = () => (
     <div className="space-y-6">
       <Card className="border-none shadow-sm">
-        <CardContent className="pt-6">
-          <form onSubmit={(e) => { e.preventDefault(); syncGlobalSearch(rptarSearchQuery, true); }} className="flex gap-2 max-w-2xl">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <Input
-                placeholder="Search by PIN, Registered Owner, or Taxpayer..."
-                className="pl-9 h-12 rounded-md border-gray-200"
-                value={rptarSearchQuery}
-                onChange={(e) => syncGlobalSearch(e.target.value)}
-              />
+        <CardContent className="pt-6 space-y-3">
+          <form onSubmit={(e) => { e.preventDefault(); syncGlobalSearch(rptarSearchQuery, true); }} className="flex flex-col gap-3 xl:flex-row xl:items-center">
+            <div className="flex gap-2 max-w-2xl w-full">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <Input
+                  placeholder="Search by PIN, Registered Owner, or Taxpayer..."
+                  className="pl-9 h-12 rounded-md border-gray-200"
+                  value={rptarSearchQuery}
+                  onChange={(e) => syncGlobalSearch(e.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={isRptarSearching} className="h-12 px-6 rounded-md bg-blue-600 hover:bg-blue-700">
+                {isRptarSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Search'}
+              </Button>
             </div>
-            <Button type="submit" disabled={isRptarSearching} className="h-12 px-6 rounded-md bg-blue-600 hover:bg-blue-700">
-              {isRptarSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Search'}
-            </Button>
+
+            <div className="flex items-center gap-2 xl:ml-auto">
+              <input
+                type="file"
+                ref={rptarPdfInputRef}
+                className="hidden"
+                accept=".pdf"
+                multiple
+                onChange={handleRptarPdfUpload}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => rptarPdfInputRef.current?.click()}
+                disabled={isRptarPdfProcessing || rptarSearchResults.length === 0}
+                className="h-12 gap-2"
+              >
+                {isRptarPdfProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                Upload SOAs
+              </Button>
+              {Object.keys(rptarUploadedSoasByProperty).length > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setRptarUploadedSoasByProperty({});
+                    setRptarUploadStatus(null);
+                  }}
+                  className="h-12 text-gray-500 hover:text-red-600"
+                >
+                  Clear Imported SOAs
+                </Button>
+              )}
+            </div>
           </form>
+          <div className="flex flex-col gap-1 text-xs">
+            <span className="text-gray-500">
+              RPT Computation still accepts one SOA PDF at a time. RPTAR can now accept multiple SOA PDFs and attach each match to the right account history.
+            </span>
+            {rptarUploadStatus && (
+              <span className={rptarUploadStatus.type === 'success' ? 'text-emerald-700' : 'text-red-600'}>
+                {rptarUploadStatus.text}
+              </span>
+            )}
+          </div>
         </CardContent>
       </Card>
 
@@ -2484,6 +2741,11 @@ export default function CollectorPanel() {
         <Card className="border-none shadow-sm overflow-hidden">
           <CardHeader className="bg-gray-50 border-b border-gray-200">
             <CardTitle className="text-lg font-bold text-gray-900">Search Result{rptarSearchResults.length > 1 ? 's' : ''}</CardTitle>
+            {rptarSearchResults.some(prop => (rptarPinMeta.get(prop.id)?.count || 1) > 1) && (
+              <CardDescription>
+                Some records share the same PIN by design. Treat each row as a separate roll entry and use the owner and other descriptors to pick the right one.
+              </CardDescription>
+            )}
           </CardHeader>
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-left">
@@ -2492,18 +2754,31 @@ export default function CollectorPanel() {
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider">Registered Owner</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider">Taxpayer</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">PIN</th>
+                  <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Status / Class</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">Lot No.</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-right whitespace-nowrap">Area</th>
                   <th className="px-6 py-3 text-sm font-semibold text-gray-500 uppercase tracking-wider text-center whitespace-nowrap">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 bg-white">
-                {rptarSearchResults.map((prop) => (
+                {rptarSearchResults.map((prop) => {
+                  const pinMeta = rptarPinMeta.get(prop.id) || { count: 1, index: 1 };
+                  const isDuplicatePin = pinMeta.count > 1;
+                  return (
                   <tr
                     key={prop.id}
-                    className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                    className={`transition-colors ${rptarSelectedPropertyId === prop.id ? 'bg-blue-50' : isDuplicatePin ? 'bg-amber-50/30 hover:bg-amber-50/60' : 'hover:bg-gray-50'}`}
                   >
-                    <td className="px-6 py-4 text-gray-900 font-medium text-sm whitespace-normal break-words leading-tight">{prop.registered_owner_name}</td>
+                    <td className="px-6 py-4 text-gray-900 font-medium text-sm whitespace-normal break-words leading-tight">
+                      <div className="flex flex-col gap-1">
+                        <span>{prop.registered_owner_name}</span>
+                        {isDuplicatePin && (
+                          <span className="inline-flex w-fit items-center px-2 py-0.5 rounded text-[10px] font-extrabold uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-200">
+                            Duplicate PIN record {pinMeta.index} of {pinMeta.count}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-6 py-4 text-gray-600 text-sm whitespace-normal break-words leading-tight">
                       {prop.linked_taxpayer ? (
                         <div className="flex flex-col gap-1 items-start">
@@ -2515,7 +2790,34 @@ export default function CollectorPanel() {
                         <span className="text-gray-400 text-xs italic">Not Tagged</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 font-mono text-sm text-gray-600 whitespace-nowrap">{prop.pin}</td>
+                    <td className="px-6 py-4 font-mono text-sm text-gray-600 whitespace-nowrap">
+                      <div className="flex flex-col gap-1">
+                        <span>{prop.pin}</span>
+                        {isDuplicatePin && (
+                          <span className="text-[10px] font-semibold text-amber-700">Shared PIN group</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-sm text-gray-600 whitespace-nowrap">
+                      <div className="flex flex-wrap gap-1">
+                        {prop.status && !prop.status.toLowerCase().includes('unpaid') && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-blue-700 border border-blue-200">
+                            {prop.status}
+                          </span>
+                        )}
+                        {prop.classification && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-purple-50 text-purple-700 border border-purple-200">
+                            {prop.classification}
+                          </span>
+                        )}
+                        {prop.taxability && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200">
+                            {prop.taxability}
+                          </span>
+                        )}
+                        {!prop.status && !prop.classification && !prop.taxability && <span>-</span>}
+                      </div>
+                    </td>
                     <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.lot_no}</td>
                     <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">{prop.total_area || '-'}</td>
                     <td className="px-6 py-4 text-center align-middle leading-none">
@@ -2529,7 +2831,7 @@ export default function CollectorPanel() {
                       </Button>
                     </td>
                   </tr>
-                ))}
+                )})}
               </tbody>
             </table>
           </div>
@@ -2544,43 +2846,65 @@ export default function CollectorPanel() {
                 <History className="w-5 h-5 text-gray-700" />
                 Account History
               </CardTitle>
+              <div className="text-xs text-gray-500">
+                {selectedRptarUploadedSoas.length > 0
+                  ? `${selectedRptarUploadedSoas.length} imported SOA file${selectedRptarUploadedSoas.length === 1 ? '' : 's'} attached`
+                  : 'No imported SOA attached'}
+              </div>
             </div>
           </CardHeader>
           <CardContent className="pt-0 overflow-x-auto">
-              <table className="w-full text-xs text-left">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  {/* Main header row */}
-                  <tr>
-                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap border-r border-gray-200">TD No.</th>
-                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap border-r border-gray-200">Year<br />Covered</th>
-                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-right border-r border-gray-200">Assessed<br />Value</th>
-                    <th colSpan={3} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Collectibles</th>
-                    <th colSpan={7} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Collected</th>
-                    <th colSpan={2} className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider text-center border-r border-gray-200">Balance</th>
-                    <th className="px-3 py-3 font-semibold text-gray-600 uppercase tracking-wider whitespace-nowrap">Remarks</th>
+              {selectedRptarUploadedSoas.length > 0 && (
+                <div className="m-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4 space-y-2 text-sm">
+                  <h4 className="font-semibold text-emerald-900">Imported SOAs For This Record</h4>
+                  <div className="space-y-2 text-emerald-950">
+                    {selectedRptarUploadedSoas.map((batch, index) => (
+                      <div key={`${batch.fileName}-${index}`} className="rounded border border-emerald-200 bg-white/70 px-3 py-2">
+                        <div className="font-semibold">{batch.fileName}</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-1 text-xs mt-1">
+                          <div><span className="font-medium">Registered Owner:</span> {batch.summary.ownerName || 'Not found'}</div>
+                          <div><span className="font-medium">PIN:</span> {batch.summary.pin || 'Not found'}</div>
+                          <div><span className="font-medium">Lot#:</span> {batch.summary.lotNo || 'Not found'}</div>
+                          <div><span className="font-medium">Area:</span> {batch.summary.area || 'Not found'}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <table className="w-full min-w-[1220px] text-xs text-left border-separate border-spacing-0">
+                <thead className="bg-slate-50 text-slate-700">
+                  <tr className="border-b border-slate-200">
+                    <th rowSpan={2} className="px-3 py-2.5 align-middle text-[11px] font-bold uppercase tracking-[0.18em] whitespace-nowrap border-r border-slate-200 bg-slate-50">TD No.</th>
+                    <th rowSpan={2} className="px-3 py-2.5 align-middle text-[11px] font-bold uppercase tracking-[0.18em] whitespace-nowrap border-r border-slate-200 bg-slate-50">Year Covered</th>
+                    <th rowSpan={2} className="px-3 py-2.5 align-middle text-[11px] font-bold uppercase tracking-[0.18em] text-right whitespace-nowrap border-r border-slate-200 bg-slate-50">Assessed Value</th>
+                    <th colSpan={3} className="px-3 pt-2.5 pb-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-center border-r border-slate-200 bg-slate-50">Collectibles</th>
+                    <th colSpan={7} className="px-3 pt-2.5 pb-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-center border-r border-slate-200 bg-slate-50">Collected</th>
+                    <th colSpan={2} className="px-3 pt-2.5 pb-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-center border-r border-slate-200 bg-slate-50">Balance</th>
+                    <th rowSpan={2} className="px-3 py-2.5 align-middle text-[11px] font-bold uppercase tracking-[0.18em] whitespace-nowrap bg-slate-50">Remarks</th>
                   </tr>
-                  {/* Sub-header row */}
-                  <tr className="border-t border-gray-200">
-                    <th colSpan={3}></th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Total</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Date</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">OR No.</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Interest</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Discount</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Total</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">Basic<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs border-r border-gray-100">SEF<br />Tax</th>
-                    <th className="px-3 py-2 font-semibold text-gray-600 text-right text-xs"></th>
+                  <tr className="border-t border-slate-200 border-b border-slate-200">
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Basic Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">SEF Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-200 bg-white">Total</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Date</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">OR No.</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Basic Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">SEF Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Interest</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Discount</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-200 bg-white">Total</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-100 bg-white">Basic Tax</th>
+                    <th className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-right whitespace-nowrap border-r border-slate-200 bg-white">SEF Tax</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {(() => {
                     const prop = rptarSearchResults.find(p => p.id === rptarSelectedPropertyId);
-                    const displayPayments = rptarPayments.length > 0 ? rptarPayments : (prop ? [{
+                    const importedSoaRows = selectedRptarUploadedSoas.flatMap(batch => batch.rows);
+                    const displayPayments = importedSoaRows.length > 0
+                      ? [...importedSoaRows, ...rptarPayments]
+                      : rptarPayments.length > 0 ? rptarPayments : (prop ? [{
                       id: 'synthetic-unpaid',
                       year: new Date().getFullYear().toString(),
                       assessed_value: prop.total_assessed_value || prop.assessed_value || 0,
@@ -2619,27 +2943,27 @@ export default function CollectorPanel() {
                     const balanceSef = collectiblesSef - collectedSef;
                     return (
                       <tr key={payment.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-3 py-3 font-medium text-gray-900 text-xs border-r border-gray-100">{payment.td_no || prop?.td_no || '-'}</td>
-                        <td className="px-3 py-3 text-gray-600 text-xs border-r border-gray-100">{payment.year || '-'}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">
+                        <td className="px-3 py-2.5 font-medium text-gray-900 text-xs border-r border-gray-100">{payment.td_no || prop?.td_no || '-'}</td>
+                        <td className="px-3 py-2.5 text-gray-600 text-xs border-r border-gray-100">{payment.year || '-'}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">
                           {payment.assessed_value ? parseFloat(String(payment.assessed_value)).toLocaleString(undefined, { minimumFractionDigits: 2 }) : '---'}
                         </td>
                         {/* Collectibles */}
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{collectiblesTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectiblesSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{collectiblesTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         {/* Collected */}
-                        <td className="px-3 py-3 text-right font-medium text-gray-600 text-xs border-r border-gray-100">{payment.payment_date ? new Date(payment.payment_date).toLocaleDateString() : '---'}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-600 text-xs border-r border-gray-100">{payment.or_no || '---'}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.discount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{(collectedBasic + collectedSef + parseFloat(String(payment.interest || 0)) - parseFloat(String(payment.discount || 0))).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-medium text-gray-600 text-xs border-r border-gray-100">{payment.payment_date ? new Date(payment.payment_date).toLocaleDateString() : '---'}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-600 text-xs border-r border-gray-100">{payment.or_no || '---'}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{collectedSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.interest || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{parseFloat(String(payment.discount || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold text-gray-900 text-xs border-r border-gray-100">{(collectedBasic + collectedSef + parseFloat(String(payment.interest || 0)) - parseFloat(String(payment.discount || 0))).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         {/* Balance */}
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="px-3 py-3 text-gray-500 text-xs italic">{payment.remarks || '-'}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceBasic.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-gray-700 text-xs border-r border-gray-100">{balanceSef.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="px-3 py-2.5 text-gray-500 text-xs italic">{payment.remarks || '-'}</td>
                       </tr>
                     );
                   });
@@ -2886,8 +3210,10 @@ export default function CollectorPanel() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>PIN</TableHead>
+                      <TableHead>Record</TableHead>
                       <TableHead>Location</TableHead>
                       <TableHead>Registered Owner</TableHead>
+                      <TableHead>Status / Class</TableHead>
                       <TableHead>TD No.</TableHead>
                       <TableHead>Lot No.</TableHead>
                       <TableHead className="text-right">Area</TableHead>
@@ -2896,12 +3222,61 @@ export default function CollectorPanel() {
                   </TableHeader>
                   <TableBody>
                     {selectedLogPins.map((pin, i) => {
-                      const prop = selectedLogProperties.find(p => p.pin === pin);
-                      return (
-                        <TableRow key={i}>
-                          <TableCell className="font-mono text-sm whitespace-nowrap">{pin}</TableCell>
+                      const matchingProps = selectedLogProperties.filter(p => p.pin === pin);
+
+                      if (matchingProps.length === 0) {
+                        return (
+                          <TableRow key={`${pin}-${i}-missing`}>
+                            <TableCell className="font-mono text-sm whitespace-nowrap">{pin}</TableCell>
+                            <TableCell className="text-xs text-gray-400">No matched record</TableCell>
+                            <TableCell className="max-w-[150px] truncate" title={getLocationFromPin(pin)}>{getLocationFromPin(pin)}</TableCell>
+                            <TableCell>N/A</TableCell>
+                            <TableCell>N/A</TableCell>
+                            <TableCell className="whitespace-nowrap">N/A</TableCell>
+                            <TableCell className="whitespace-nowrap">N/A</TableCell>
+                            <TableCell className="text-right whitespace-nowrap">N/A</TableCell>
+                            <TableCell className="text-right font-mono whitespace-nowrap">N/A</TableCell>
+                          </TableRow>
+                        );
+                      }
+
+                      return matchingProps.map((prop, matchIndex) => (
+                        <TableRow key={`${pin}-${i}-${prop.id}-${matchIndex}`}>
+                          <TableCell className="font-mono text-sm whitespace-nowrap">
+                            <div className="flex flex-col gap-1">
+                              <span>{pin}</span>
+                              {matchingProps.length > 1 && (
+                                <span className="inline-flex w-fit items-center rounded-full border border-amber-200 bg-amber-100 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-800">
+                                  Shared PIN
+                                </span>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs text-gray-600">
+                            {matchingProps.length > 1 ? `Record ${matchIndex + 1} of ${matchingProps.length}` : 'Single record'}
+                          </TableCell>
                           <TableCell className="max-w-[150px] truncate" title={prop?.address || getLocationFromPin(pin)}>{prop?.address || getLocationFromPin(pin)}</TableCell>
                           <TableCell className="max-w-[150px] truncate" title={prop?.registered_owner_name || 'N/A'}>{prop?.registered_owner_name || 'N/A'}</TableCell>
+                          <TableCell className="max-w-[220px]">
+                            <div className="flex flex-wrap gap-1">
+                              {prop?.status && (
+                                <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-blue-700">
+                                  {prop.status}
+                                </span>
+                              )}
+                              {prop?.classification && (
+                                <span className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-purple-700">
+                                  {prop.classification}
+                                </span>
+                              )}
+                              {prop?.taxability && (
+                                <span className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-indigo-700">
+                                  {prop.taxability}
+                                </span>
+                              )}
+                              {!prop?.status && !prop?.classification && !prop?.taxability && <span>N/A</span>}
+                            </div>
+                          </TableCell>
                           <TableCell className="whitespace-nowrap">{prop?.td_no || 'N/A'}</TableCell>
                           <TableCell className="whitespace-nowrap">{prop?.lot_no || 'N/A'}</TableCell>
                           <TableCell className="text-right whitespace-nowrap">{prop?.total_area || 'N/A'}</TableCell>
@@ -2909,7 +3284,7 @@ export default function CollectorPanel() {
                             {prop?.assessed_value ? parseFloat(String(prop.assessed_value)).toLocaleString(undefined, { minimumFractionDigits: 2 }) : 'N/A'}
                           </TableCell>
                         </TableRow>
-                      );
+                      ));
                     })}
                   </TableBody>
                 </Table>
@@ -3043,3 +3418,4 @@ export default function CollectorPanel() {
     </div>
   );
 }
+
