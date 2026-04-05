@@ -1,0 +1,1 @@
+import { Pool } from 'pg'; const pool = new Pool({ user: 'postgres', host: '127.0.0.1', database: 'rpt_monitor_data', password: 'To!nk6125', port: 5433 }); pool.query('SELECT NOW()', (err, res) => { if (err) { console.error('Connection error:', err.stack); } else { console.log('Connected successfully:', res.rows[0]); } pool.end(); });

@@ -2670,9 +2670,9 @@ export default function AdminPanel() {
       <Card className="border-none shadow-sm">
         <CardContent className="space-y-4 pt-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Taxpayer</Label>
-              <Select
+             <div className="space-y-2">
+               <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Taxpayer:</Label>
+               <Select
                 value={selectedTaxpayerId}
                 onValueChange={v => {
                   setSelectedTaxpayerId(v);
@@ -2711,9 +2711,9 @@ export default function AdminPanel() {
               </Select>
             </div>
 
-            <div className="space-y-2">
-              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">PIN</Label>
-              <Select
+             <div className="space-y-2">
+               <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wider">PIN:</Label>
+               <Select
                 value={selectedComputationPropertyId}
                 onValueChange={setSelectedComputationPropertyId}
                 disabled={!selectedTaxpayerId}
@@ -2735,10 +2735,10 @@ export default function AdminPanel() {
             </div>
           </div>
 
-          {selectedCompProperty && (
-            <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200 space-y-3">
-              <h3 className="font-semibold text-gray-900">Property Details</h3>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+           {selectedCompProperty && (
+             <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200 space-y-3">
+               <h3 className="font-semibold text-gray-900">Property Details:</h3>
+               <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
                 <div>
                   <span className="block text-gray-500 text-xs uppercase">Registered Owner</span>
                   <span className="font-medium">{selectedCompProperty.registered_owner_name}</span>
@@ -2750,6 +2750,10 @@ export default function AdminPanel() {
                 <div>
                   <span className="block text-gray-500 text-xs uppercase">Lot No.</span>
                   <span className="font-medium">{selectedCompProperty.lot_no}</span>
+                </div>
+                <div>
+                  <span className="block text-gray-500 text-xs uppercase">Area</span>
+                  <span className="font-medium">{selectedCompProperty.total_area}</span>
                 </div>
                 <div>
                   <span className="block text-gray-500 text-xs uppercase">TD No.</span>
@@ -2767,36 +2771,32 @@ export default function AdminPanel() {
             <div className="space-y-6 mt-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-4">
-                  <div className="space-y-2">
-                    <Label>Rule</Label>
-                    <div className="flex flex-wrap gap-2">
+                  <div className="flex items-center gap-10">
+                    <Label>Computation:</Label>
+                    <div className="flex gap-10">
                       {availableComputationRules.map(rule => {
                         const isDisabled = !isRuleEffective(rule);
                         const isActive = paymentForm.computationType === rule.value;
 
                         return (
-                          <Button
+                          <span
                             key={rule.value}
-                            type="button"
-                            variant={isActive ? 'default' : 'outline'}
-                            disabled={isDisabled}
-                            onClick={() => setPaymentForm(prev => ({ ...prev, computationType: rule.value }))}
-                            className="h-9 rounded-full px-4 text-xs font-semibold"
+                            onClick={() => !isDisabled && setPaymentForm(prev => ({ ...prev, computationType: rule.value }))}
+                            className={`cursor-pointer text-sm transition-colors duration-200 ${
+                              isActive ? 'font-bold text-blue-600' : 'text-gray-600 hover:text-blue-500'
+                            } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                           >
                             {rule.label}
                             {isDisabled ? ' (Inactive)' : ''}
-                          </Button>
+                          </span>
                         );
                       })}
                     </div>
-                    <p className="text-xs text-gray-500">
-                      Current-year and advance-payment discounts still follow the selected rule and the app&apos;s existing year logic.
-                    </p>
                   </div>
 
-                  <div className="space-y-2">
-                    <Label>Year / Range</Label>
-                    <div className="flex gap-2">
+                   <div className="space-y-2">
+                     <Label>Year/Range:</Label>
+                     <div className="flex gap-2">
                       <Input
                         type="text"
                         placeholder="e.g. 1990 or 1990-1995"
@@ -2851,9 +2851,9 @@ export default function AdminPanel() {
                   )}
                 </div>
 
-                <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-4">
-                  <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Computation Breakdown</h4>
-                  <div className="flex justify-between items-center text-sm">
+                 <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-4">
+                   <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Computation Breakdown:</h4>
+                   <div className="flex justify-between items-center text-sm">
                     <span className="text-gray-600">Basic Tax (1%)</span>
                     <span className="font-medium font-mono text-gray-900 inline-flex items-center">
                       <span className="invisible">(</span>
@@ -2914,11 +2914,11 @@ export default function AdminPanel() {
         </CardContent>
       </Card>
 
-      {paymentQueue.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Tax Summary</CardTitle>
-            <CardDescription>Review items before finalizing payment</CardDescription>
+       {paymentQueue.length > 0 && (
+         <Card>
+           <CardHeader>
+             <CardTitle>Tax Summary:</CardTitle>
+             <CardDescription>Review items before finalizing payment</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="border border-gray-200 rounded-xl overflow-hidden shadow-sm">
@@ -3809,51 +3809,49 @@ export default function AdminPanel() {
                 {isRptarSearching ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Search'}
               </Button>
             </div>
-
-            <div className="flex items-center gap-2 xl:ml-auto">
-              <input
-                type="file"
-                ref={rptarPdfInputRef}
-                className="hidden"
-                accept=".pdf"
-                multiple
-                onChange={handleRptarPdfUpload}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => rptarPdfInputRef.current?.click()}
-                disabled={isRptarPdfProcessing || rptarSearchResults.length === 0}
-                className="h-9 gap-2 rounded-none text-xs font-semibold"
-              >
-                {isRptarPdfProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3.5 h-3.5" />}
-                Upload SOAs
-              </Button>
-              {Object.keys(rptarUploadedSoasByProperty).length > 0 && (
+            <div className="flex flex-col items-end gap-1 xl:ml-auto">
+              <div className="flex items-center gap-2">
+                <input
+                  type="file"
+                  ref={rptarPdfInputRef}
+                  className="hidden"
+                  accept=".pdf"
+                  multiple
+                  onChange={handleRptarPdfUpload}
+                />
                 <Button
                   type="button"
-                  variant="ghost"
-                  onClick={() => {
-                    setRptarUploadedSoasByProperty({});
-                    setRptarUploadStatus(null);
-                  }}
-                  className="h-9 rounded-none px-3 text-xs text-gray-500 hover:text-red-600"
+                  variant="outline"
+                  onClick={() => rptarPdfInputRef.current?.click()}
+                  disabled={isRptarPdfProcessing || rptarSearchResults.length === 0}
+                  className="h-12 gap-2"
                 >
-                  Clear Imported SOAs
+                  {isRptarPdfProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                  Upload SOAs
                 </Button>
+                {Object.keys(rptarUploadedSoasByProperty).length > 0 && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      setRptarUploadedSoasByProperty({});
+                      setRptarUploadStatus(null);
+                    }}
+                    className="h-12 text-gray-500 hover:text-red-600"
+                  >
+                    Clear Imported SOAs
+                  </Button>
+                )}
+              </div>
+              {rptarUploadStatus && (
+                <div className="flex flex-col gap-1 text-xs text-right pr-1">
+                  <span className={rptarUploadStatus.type === 'success' ? 'text-emerald-700' : 'text-red-600'}>
+                    {rptarUploadStatus.text}
+                  </span>
+                </div>
               )}
             </div>
           </form>
-          <div className="flex flex-col gap-1 text-xs">
-            <span className="text-gray-500">
-              RPT Computation stays single-PDF. RPTAR can accept multiple SOA PDFs after search and place each matched account inline in history.
-            </span>
-            {rptarUploadStatus && (
-              <span className={rptarUploadStatus.type === 'success' ? 'text-emerald-700' : 'text-red-600'}>
-                {rptarUploadStatus.text}
-              </span>
-            )}
-          </div>
         </CardContent>
       </Card>
 
@@ -3964,12 +3962,12 @@ export default function AdminPanel() {
                         <td className="px-6 py-3 text-sm text-gray-600 whitespace-nowrap align-top">{prop.lot_no || '-'}</td>
                         <td className="px-6 py-3 font-mono text-sm text-gray-600 text-right whitespace-nowrap align-top">{prop.total_area || '-'}</td>
                         <td className="px-6 py-3 text-center whitespace-nowrap align-top">
-                          <button
+                          <span
                             onClick={() => setRptarSelectedPropertyId(prop.id === rptarSelectedPropertyId ? null : prop.id)}
-                            className="text-xs font-medium text-gray-600 hover:text-blue-600 border border-gray-200 px-3 py-1.5 rounded-md hover:border-blue-200 hover:bg-blue-50 transition-all mx-auto block"
+                            className="text-blue-600 hover:text-blue-800 cursor-pointer font-medium text-sm"
                           >
                             {rptarSelectedPropertyId === prop.id ? 'Hide' : 'Account History'}
-                          </button>
+                          </span>
                         </td>
                       </tr>
                       {isDuplicatePin && (

@@ -2012,11 +2012,11 @@ export default function CollectorPanel() {
                               </td>
                             </tr>
                             {expandedAssessmentId === assessment.id && (
-                              <tr className="bg-indigo-50/30">
-                                <td colSpan={10} className="px-4 py-4 border-l-4 border-l-indigo-500">
-                                  <div className="mb-2 px-1">
-                                    <h4 className="text-sm font-bold text-indigo-900 uppercase tracking-wide">Tax Summary</h4>
-                                  </div>
+                               <tr className="bg-indigo-50/30">
+                                 <td colSpan={10} className="px-4 py-4 border-l-4 border-l-indigo-500">
+                                   <div className="mb-2 px-1">
+                                     <h4 className="text-sm font-bold text-indigo-900 uppercase tracking-wide">Tax Summary:</h4>
+                                   </div>
                                   <div className="border border-indigo-100 rounded-xl overflow-hidden shadow-sm bg-white">
                                     <table className="w-full text-sm text-left">
                                       <thead className="bg-indigo-50/50 border-b border-indigo-100">
@@ -2306,35 +2306,31 @@ export default function CollectorPanel() {
               {/* Inputs */}
               <div className="grid grid-cols-1 gap-4">
                 <div className="space-y-2">
-                  <Label>Rule</Label>
-                  <div className="flex flex-wrap gap-2">
+                  <Label>Computation:</Label>
+                  <div className="flex flex-wrap gap-6">
                     {availableComputationRules.map(rule => {
                       const isDisabled = !isRuleEffective(rule);
                       const isActive = paymentForm.computationType === rule.value;
 
                       return (
-                        <Button
+                        <span
                           key={rule.value}
-                          type="button"
-                          variant={isActive ? 'default' : 'outline'}
-                          disabled={isDisabled}
-                          onClick={() => setPaymentForm(prev => ({ ...prev, computationType: rule.value }))}
-                          className="h-9 rounded-full px-4 text-xs font-semibold"
+                          onClick={() => !isDisabled && setPaymentForm(prev => ({ ...prev, computationType: rule.value }))}
+                          className={`cursor-pointer text-sm transition-colors duration-200 ${
+                            isActive ? 'font-bold text-blue-600' : 'text-gray-600 hover:text-blue-500'
+                          } ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                         >
                           {rule.label}
                           {isDisabled ? ' (Inactive)' : ''}
-                        </Button>
+                        </span>
                       );
                     })}
                   </div>
-                  <p className="text-xs text-gray-500">
-                    Current-year and advance-payment discounts still follow the selected rule and the app&apos;s existing year logic.
-                  </p>
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Year / Range</Label>
-                  <div className="flex gap-2">
+                 <div className="space-y-2">
+                   <Label>Year/Range:</Label>
+                   <div className="flex gap-2">
                     <Input
                       type="text"
                       placeholder="e.g. 1990 or 1990-1995"
@@ -2754,50 +2750,49 @@ export default function CollectorPanel() {
               </Button>
             </div>
 
-            <div className="flex items-center gap-2 xl:ml-auto">
-              <input
-                type="file"
-                ref={rptarPdfInputRef}
-                className="hidden"
-                accept=".pdf"
-                multiple
-                onChange={handleRptarPdfUpload}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => rptarPdfInputRef.current?.click()}
-                disabled={isRptarPdfProcessing || rptarSearchResults.length === 0}
-                className="h-12 gap-2"
-              >
-                {isRptarPdfProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-                Upload SOAs
-              </Button>
-              {Object.keys(rptarUploadedSoasByProperty).length > 0 && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => {
-                    setRptarUploadedSoasByProperty({});
-                    setRptarUploadStatus(null);
-                  }}
-                  className="h-12 text-gray-500 hover:text-red-600"
-                >
-                  Clear Imported SOAs
-                </Button>
-              )}
-            </div>
+            <div className="flex flex-col items-end gap-1 xl:ml-auto">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="file"
+                    ref={rptarPdfInputRef}
+                    className="hidden"
+                    accept=".pdf"
+                    multiple
+                    onChange={handleRptarPdfUpload}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => rptarPdfInputRef.current?.click()}
+                    disabled={isRptarPdfProcessing || rptarSearchResults.length === 0}
+                    className="h-12 gap-2"
+                  >
+                    {isRptarPdfProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                    Upload SOAs
+                  </Button>
+                  {Object.keys(rptarUploadedSoasByProperty).length > 0 && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => {
+                        setRptarUploadedSoasByProperty({});
+                        setRptarUploadStatus(null);
+                      }}
+                      className="h-12 text-gray-500 hover:text-red-600"
+                    >
+                      Clear Imported SOAs
+                    </Button>
+                  )}
+                </div>
+                {rptarUploadStatus && (
+                  <div className="flex flex-col gap-1 text-xs text-right pr-1">
+                    <span className={rptarUploadStatus.type === 'success' ? 'text-emerald-700' : 'text-red-600'}>
+                      {rptarUploadStatus.text}
+                    </span>
+                  </div>
+                )}
+              </div>
           </form>
-          <div className="flex flex-col gap-1 text-xs">
-            <span className="text-gray-500">
-              RPT Computation still accepts one SOA PDF at a time. RPTAR can now accept multiple SOA PDFs and attach each match to the right account history.
-            </span>
-            {rptarUploadStatus && (
-              <span className={rptarUploadStatus.type === 'success' ? 'text-emerald-700' : 'text-red-600'}>
-                {rptarUploadStatus.text}
-              </span>
-            )}
-          </div>
         </CardContent>
       </Card>
 
@@ -2884,15 +2879,13 @@ export default function CollectorPanel() {
                     </td>
                     <td className="px-6 py-4 text-gray-600 text-sm whitespace-nowrap">{prop.lot_no}</td>
                     <td className="px-6 py-4 text-right font-mono text-gray-700 text-sm whitespace-nowrap">{prop.total_area || '-'}</td>
-                    <td className="px-6 py-4 text-center align-middle leading-none">
-                      <Button
-                        size="sm"
-                        variant={rptarSelectedPropertyId === prop.id ? "default" : "outline"}
+                    <td className="px-6 py-3 text-center text-sm whitespace-nowrap">
+                      <span
+                        className="text-blue-600 hover:text-blue-800 cursor-pointer font-medium"
                         onClick={() => setRptarSelectedPropertyId(prop.id === rptarSelectedPropertyId ? null : prop.id)}
-                        className="h-8 text-xs gap-2"
                       >
                         {rptarSelectedPropertyId === prop.id ? 'Hide' : 'Account History'}
-                      </Button>
+                      </span>
                     </td>
                   </tr>
                 )})}

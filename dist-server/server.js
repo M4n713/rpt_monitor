@@ -144,9 +144,9 @@ const JWT_SECRET = getJwtSecret();
 // Initialize PostgreSQL Pool
 const getPoolConfig = () => {
     const commonConfig = {
-        connectionTimeoutMillis: 5000, // 5 seconds timeout
+        connectionTimeoutMillis: 10000, // 10 seconds timeout
         idleTimeoutMillis: 10000,
-        query_timeout: 10000, // 10 seconds query timeout
+        query_timeout: 20000, // 20 seconds query timeout
         keepAlive: true, // Keep connection alive
         max: 20, // Max clients in pool
     };
@@ -154,10 +154,10 @@ const getPoolConfig = () => {
         ? { ...commonConfig, connectionString: process.env.DATABASE_URL }
         : {
             ...commonConfig,
-            user: process.env.DB_USER || 'postgres',
-            host: process.env.DB_HOST || 'localhost',
-            database: process.env.DB_NAME || 'rpt_monitor_data',
-            password: process.env.DB_PASSWORD,
+            user: String(process.env.DB_USER || 'postgres'),
+            host: String(process.env.DB_HOST || 'localhost'),
+            database: String(process.env.DB_NAME || 'rpt_monitor_data'),
+            password: String(process.env.DB_PASSWORD || ''),
             port: parseInt(process.env.DB_PORT || '5433'),
         };
     // Add SSL if requested or if using a cloud database URL (common for Neon/Supabase)
@@ -172,11 +172,12 @@ const getPoolConfig = () => {
         };
     }
     console.log('[DB] Final Config (sanitized):', {
-        user: config.user || 'from URL',
-        host: config.host || 'from URL',
-        database: config.database || 'from URL',
-        port: config.port || 'from URL',
-        ssl: !!config.ssl
+        user: config.user || (config.connectionString ? 'from URL' : 'missing'),
+        host: config.host || (config.connectionString ? 'from URL' : 'missing'),
+        database: config.database || (config.connectionString ? 'from URL' : 'missing'),
+        port: config.port || (config.connectionString ? 'from URL' : 'missing'),
+        ssl: !!config.ssl,
+        hasPassword: !!(config.password || (config.connectionString && (config.connectionString.includes(':') && config.connectionString.split('@')[0].includes(':'))))
     });
     return config;
 };
@@ -391,7 +392,7 @@ const mockStore = {
     ]
 };
 // Initialize Database Schema with retries
-const initDb = async (retries = 1, delay = 1000) => {
+const initDb = async (retries = 5, delay = 2000) => {
     let client;
     const isPrivateIp = poolConfig.host?.startsWith('100.') || poolConfig.host?.startsWith('192.168.') || poolConfig.host?.startsWith('10.') || poolConfig.host?.startsWith('172.');
     for (let i = 0; i < retries; i++) {
@@ -2986,4 +2987,4 @@ async function startServer() {
         console.log('[Server] TIP: Set TAILSCALE_CERT, TAILSCALE_KEY, and TAILSCALE_HOST env vars to enable HTTPS.');
     }
 }
-initDb().then(startServer);
+initDb(3).then(startServer);
