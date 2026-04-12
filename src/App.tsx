@@ -50,7 +50,11 @@ export default function App() {
             </PrivateRoute>
           } />
 
-          <Route path="/queue" element={<QueueSystem />} />
+          <Route path="/queue" element={
+            <PrivateRoute roles={['queue', 'admin']}>
+              <QueueSystem />
+            </PrivateRoute>
+          } />
 
           <Route path="/" element={<Navigate to="/login" />} />
         </Routes>

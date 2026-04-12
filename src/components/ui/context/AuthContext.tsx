@@ -4,7 +4,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 interface User {
   id: number;
   username: string;
-  role: 'taxpayer' | 'collector' | 'admin';
+  role: 'taxpayer' | 'collector' | 'admin' | 'queue';
   full_name: string;
 }
 
@@ -47,6 +47,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(userData);
     if (userData.role === 'admin') navigate('/admin');
     else if (userData.role === 'collector') navigate('/collector');
+    else if (userData.role === 'queue') navigate('/queue');
     else navigate('/dashboard');
   };
 

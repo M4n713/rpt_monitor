@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'rpt-monitor',
       script: 'c:\\Users\\manli\\Desktop\\rpt_monitor\\rpt_monitor\\node_modules\\.bin\\tsx.cmd',
-      args: 'server.ts',
+      args: 'server/index.ts',
       interpreter: 'none',
       instances: process.platform === 'win32' ? 1 : 'max',
       exec_mode: process.platform === 'win32' ? 'fork' : 'cluster',
